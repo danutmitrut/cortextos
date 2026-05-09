@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# pre-commit hook — installed by scripts/setup-hooks.sh
+#
+# Refuses to commit:
+#   1. Any file named *.env (except .env.example, .env.*.example)
+#   2. Any file named secrets.env, credentials.json, *.pem, *.key
+#   3. Any staged content matching well-known secret patterns:
+#      - Telegram BOT_TOKEN  : <digits>:<35-char base64>
+#      - Anthropic API key   : sk-ant-...
+#      - OpenAI API key      : sk-proj-... or sk-...
+#      - Google API key      : AIza<35-char>
+#      - GitHub PAT          : ghp_<36-char> / github_pat_<82-char>
+#      - AWS access key      : AKIA<16-char>
+#
+# To bypass in an absolute emergency (DO NOT use casually):
+#   git commit --no-verify
+# If you bypass, log it in your daily memory and rotate any leaked secret immediately.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+if [[ -z "${STAGED_FILES}" ]]; then
+  exit 0
+fi
+
+FAIL=0
+
+# 1. Block sensitive filenames
+#    .env, .env.local, .env.production, .env.development, .env.test, etc.
+#    are all treated as secret files. Exception: anything containing "example"
+#    in the suffix (e.g. .env.example, .env.local.example) is a template.
+while IFS= read -r f; do
+  base="$(basename "$f")"
+  case "$base" in
+    *example*)
+      continue
+      ;;
+    .env|.env.*|*.env|secrets.env|credentials.json|*.pem|*.key)
+      echo "[pre-commit] BLOCKED: $f looks like a secret file (matches .env / .env.* / secrets.env / credentials.json / *.pem / *.key)" >&2
+      FAIL=1
+      ;;
+  esac
+done <<< "${STAGED_FILES}"
+
+# 2. Scan staged content for secret patterns (only on text files, only on staged additions)
+SECRET_PATTERNS=(
+  '[0-9]{8,10}:[A-Za-z0-9_-]{35}'                          # Telegram BOT_TOKEN
+  'sk-ant-[A-Za-z0-9_-]{20,}'                              # Anthropic
+  'sk-proj-[A-Za-z0-9_-]{20,}'                             # OpenAI project key
+  'sk-[A-Za-z0-9]{48,}'                                    # OpenAI legacy
+  'AIza[0-9A-Za-z_-]{35}'                                  # Google API
+  'ghp_[A-Za-z0-9]{36}'                                    # GitHub PAT classic
+  'github_pat_[A-Za-z0-9_]{82}'                            # GitHub PAT fine-grained
+  'AKIA[0-9A-Z]{16}'                                       # AWS access key
+)
+
+while IFS= read -r f; do
+  case "$f" in
+    *.env.example|.env.example|*/.env.example|*.env.*.example|.env.*.example)
+      continue
+      ;;
+  esac
+  if [[ ! -f "$f" ]]; then continue; fi
+  # Skip binaries
+  if file --mime "$f" 2>/dev/null | grep -q "charset=binary"; then continue; fi
+
+  for pat in "${SECRET_PATTERNS[@]}"; do
+    if git diff --cached "$f" | grep -E "^\+" | grep -E "$pat" >/dev/null 2>&1; then
+      MATCH=$(git diff --cached "$f" | grep -E "^\+" | grep -oE "$pat" | head -1)
+      # Mask the secret in the failure message
+      MASKED="${MATCH:0:6}***${MATCH: -4}"
+      echo "[pre-commit] BLOCKED: $f contains a secret-shaped value matching pattern $pat (sample: $MASKED)" >&2
+      FAIL=1
+    fi
+  done
+done <<< "${STAGED_FILES}"
+
+if [[ "$FAIL" == "1" ]]; then
+  echo "" >&2
+  echo "[pre-commit] Commit aborted. Either:" >&2
+  echo "  - Remove the file/value from staging (git reset HEAD <file>) and re-stage clean content" >&2
+  echo "  - Add the file to .gitignore if it is meant to stay local" >&2
+  echo "  - As an absolute last resort: git commit --no-verify (then rotate the secret immediately)" >&2
+  exit 1
+fi
+
+exit 0
