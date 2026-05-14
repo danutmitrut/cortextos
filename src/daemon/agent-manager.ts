@@ -15,6 +15,9 @@ import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHi
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
+import { SlackAPI } from '../slack/api.js';
+import { SlackPoller } from '../slack/poller.js';
+import { logInboundSlack } from '../slack/logging.js';
 
 type LogFn = (msg: string) => void;
 
@@ -22,7 +25,7 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; slackPoller?: SlackPoller }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
@@ -242,6 +245,24 @@ export class AgentManager {
       }
     }
 
+    // Read Slack credentials from agent .env
+    let slackBotToken: string | undefined;
+    let slackAppToken: string | undefined;
+    let slackChannelId: string | undefined;
+    let slackAllowedUserId: string | undefined;
+
+    if (existsSync(agentEnvFile)) {
+      const envContent = readFileSync(agentEnvFile, 'utf-8');
+      const match = (key: string) => envContent.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim();
+      slackBotToken = match('SLACK_BOT_TOKEN');
+      slackAppToken = match('SLACK_APP_TOKEN');
+      slackChannelId = match('SLACK_CHANNEL_ID');
+      slackAllowedUserId = match('SLACK_ALLOWED_USER');
+      if (slackBotToken && slackChannelId) {
+        log(`Slack configured (channel: ****${slackChannelId.slice(-4)})`);
+      }
+    }
+
     const agentProcess = new AgentProcess(name, env, config, log);
     // Issue #330: pass the Telegram handle into AgentProcess so CodexAppServerPTY
     // can emit sendChatAction directly from the JSONL stream. Has no effect for
@@ -271,6 +292,24 @@ export class AgentManager {
           tgApi.sendMessage(tgChatId, `Agent ${name} recovered and is back online`).catch(() => {});
         }
         prevStatus = status.status;
+      });
+    }
+
+    // Send Slack notification on crashes and session refreshes
+    if (slackBotToken && slackChannelId) {
+      const slackApi = new SlackAPI(slackBotToken);
+      const slackChanId = slackChannelId;
+      let prevSlackStatus: string | null = null;
+      agentProcess.onStatusChanged((status) => {
+        if (status.status === 'crashed') {
+          const crashNum = status.crashCount ?? '?';
+          slackApi.sendMessage(slackChanId, `Agent ${name} crashed (crash #${crashNum}) - auto-restarting`).catch(() => {});
+        } else if (status.status === 'halted') {
+          slackApi.sendMessage(slackChanId, `Agent ${name} HALTED - exceeded crash limit. Restart manually with: cortextos start ${name}`).catch(() => {});
+        } else if (status.status === 'running' && prevSlackStatus === 'crashed') {
+          slackApi.sendMessage(slackChanId, `Agent ${name} recovered and is back online`).catch(() => {});
+        }
+        prevSlackStatus = status.status;
       });
     }
 
@@ -472,6 +511,34 @@ export class AgentManager {
       // operator pain. Non-orchestrator agents skip this entirely.
       await this.maybeStartActivityChannelPoller(name, org, agentDir, log);
     }
+
+    // Start Slack poller if credentials are available
+    if (slackBotToken && slackAppToken && slackChannelId) {
+      const slackPoller = new SlackPoller(slackAppToken);
+
+      slackPoller.onMessage((event) => {
+        // SLACK_ALLOWED_USER gate: ignore messages from other users
+        if (slackAllowedUserId && event.user !== slackAllowedUserId) {
+          log(`Ignoring Slack message from unauthorized user (allowed_user gate)`);
+          return;
+        }
+
+        logInboundSlack(this.ctxRoot, name, event);
+
+        const text = event.text ?? '';
+        const formatted = `Slack message from ${event.user ?? 'unknown'}: ${text}`;
+        checker.queueTelegramMessage(formatted);
+      });
+
+      slackPoller.start().catch(err => {
+        log(`Slack poller error: ${err}`);
+      });
+
+      const entry = this.agents.get(name);
+      if (entry) entry.slackPoller = slackPoller;
+
+      log('Slack poller started');
+    }
   }
 
   /**
@@ -574,6 +641,7 @@ export class AgentManager {
 
     if (entry.poller) entry.poller.stop();
     if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.slackPoller) await entry.slackPoller.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
