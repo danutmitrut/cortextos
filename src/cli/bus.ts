@@ -24,6 +24,8 @@ import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { SlackAPI as SlackAPIClass } from '../slack/api.js';
+import { logOutboundSlack } from '../slack/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -1019,6 +1021,98 @@ busCommand
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);
       process.exit(1);
+    }
+  });
+
+busCommand
+  .command('send-user')
+  .description('Send a message to the operator via all configured channels (Telegram and/or Slack)')
+  .argument('<message>', 'Message text')
+  .action(async (message: string) => {
+    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    const env = resolveEnv();
+
+    // Read agent .env for all channel credentials
+    let botToken = '';
+    let chatId = '';
+    let slackBotToken = '';
+    let slackChannelId = '';
+
+    if (env.agentDir) {
+      const agentEnvPath = join(env.agentDir, '.env');
+      if (existsSync(agentEnvPath)) {
+        const content = readFileSync(agentEnvPath, 'utf-8');
+        const match = (key: string) => content.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim() ?? '';
+        botToken = match('BOT_TOKEN');
+        chatId = match('CHAT_ID');
+        slackBotToken = match('SLACK_BOT_TOKEN');
+        slackChannelId = match('SLACK_CHANNEL_ID');
+      }
+    }
+
+    // Fall back to process env
+    if (!botToken) botToken = process.env.BOT_TOKEN ?? '';
+    if (!chatId) chatId = process.env.CHAT_ID ?? '';
+    if (!slackBotToken) slackBotToken = process.env.SLACK_BOT_TOKEN ?? '';
+    if (!slackChannelId) slackChannelId = process.env.SLACK_CHANNEL_ID ?? '';
+
+    const hasTelegram = !!(botToken && chatId);
+    const hasSlack = !!(slackBotToken && slackChannelId);
+
+    if (!hasTelegram && !hasSlack) {
+      console.error(`Error: No messaging channels configured for agent "${env.agentName ?? 'unknown'}". Set BOT_TOKEN+CHAT_ID (Telegram) or SLACK_BOT_TOKEN+SLACK_CHANNEL_ID (Slack) in the agent .env file.`);
+      process.exit(1);
+    }
+
+    const results: Array<{ channel: string; error?: string }> = [];
+
+    if (hasTelegram) {
+      try {
+        const api = new TelegramAPI(botToken);
+        const result = await api.sendMessage(chatId, message, undefined, { parseMode: 'HTML' });
+        const sentMessageId = result?.result?.message_id ?? 0;
+        if (env.agentName && env.ctxRoot) {
+          logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, { parseMode: 'html' });
+          cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
+          try {
+            const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+            const preview = message.length > 120 ? message.slice(0, 120) + '...' : message;
+            logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+          } catch { /* non-fatal */ }
+        }
+        results.push({ channel: 'telegram' });
+      } catch (err: any) {
+        results.push({ channel: 'telegram', error: err.message || String(err) });
+      }
+    }
+
+    if (hasSlack) {
+      try {
+        const slackApi = new SlackAPIClass(slackBotToken);
+        const ts = await slackApi.sendMessage(slackChannelId, message);
+        if (env.agentName && env.ctxRoot) {
+          logOutboundSlack(env.ctxRoot, env.agentName, slackChannelId, message, ts);
+        }
+        results.push({ channel: 'slack' });
+      } catch (err: any) {
+        results.push({ channel: 'slack', error: err.message || String(err) });
+      }
+    }
+
+    const succeeded = results.filter(r => !r.error);
+    const failed = results.filter(r => r.error);
+
+    if (succeeded.length > 0) {
+      console.log(`Message sent via: ${succeeded.map(r => r.channel).join(', ')}`);
+    }
+    if (failed.length > 0) {
+      for (const f of failed) {
+        console.error(`Failed to send via ${f.channel}: ${f.error}`);
+      }
+      // Exit 1 only if ALL channels failed
+      if (succeeded.length === 0) {
+        process.exit(1);
+      }
     }
   });
 
