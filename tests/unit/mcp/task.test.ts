@@ -130,6 +130,12 @@ describe('task_reject', () => {
     const result = await runTaskTool('task_reject', { task_id: 'task_999' }, testDir);
     expect(result).toContain('nu a fost găsit');
   });
+
+  it('returnează eroare pentru task corupt', async () => {
+    writeFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'task_111.json'), '{invalid json');
+    const result = await runTaskTool('task_reject', { task_id: 'task_111' }, testDir);
+    expect(result).toBeTruthy();
+  });
 });
 
 describe('task_create', () => {
