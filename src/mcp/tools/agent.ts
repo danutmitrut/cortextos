@@ -60,7 +60,12 @@ export async function runAgentTool(
     if (!existsSync(heartbeatPath)) {
       return `Agentul "${agentName}" nu are heartbeat — poate nu rulează.`;
     }
-    const hb = JSON.parse(readFileSync(heartbeatPath, 'utf-8'));
+    let hb: Record<string, unknown>;
+    try {
+      hb = JSON.parse(readFileSync(heartbeatPath, 'utf-8'));
+    } catch {
+      return `Agentul "${agentName}" are heartbeat corupt.`;
+    }
     return [
       `Agent: ${hb.agent}`,
       `Status: ${hb.status}`,
@@ -74,7 +79,7 @@ export async function runAgentTool(
     const agentName = args.agent as string;
     const message = args.message as string;
     const replyId = `mcp-${randomString(8)}`;
-    const agentPaths = resolvePaths(agentName, 'default');
+    const agentPaths = { ...resolvePaths(agentName, 'default'), ctxRoot: root };
 
     sendMessage(agentPaths, 'cli', agentName, 'urgent', message, replyId);
 
