@@ -8,7 +8,15 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents } from '../../../src/hooks/hook-crash-alert';
+const postMessageMock = vi.fn().mockResolvedValue({ ok: true });
+vi.mock('@slack/web-api', () => {
+  const WebClient = function (this: { chat: { postMessage: typeof postMessageMock } }) {
+    this.chat = { postMessage: postMessageMock };
+  };
+  return { WebClient };
+});
+
+import { readMaxCrashesPerDay, notifyAgents, sendSlackCrashAlert } from '../../../src/hooks/hook-crash-alert';
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;
@@ -143,5 +151,23 @@ describe('notifyAgents', () => {
     })).not.toThrow();
     // Second recipient still attempted
     expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('sendSlackCrashAlert', () => {
+  beforeEach(() => {
+    postMessageMock.mockReset();
+    postMessageMock.mockResolvedValue({ ok: true });
+  });
+
+  it('calls chat.postMessage with the correct channel and text', async () => {
+    await sendSlackCrashAlert('xoxb-token', 'C123', 'test message');
+    expect(postMessageMock).toHaveBeenCalledTimes(1);
+    expect(postMessageMock).toHaveBeenCalledWith({ channel: 'C123', text: 'test message' });
+  });
+
+  it('propagates errors from chat.postMessage', async () => {
+    postMessageMock.mockRejectedValueOnce(new Error('slack error'));
+    await expect(sendSlackCrashAlert('xoxb-token', 'C123', 'test message')).rejects.toThrow('slack error');
   });
 });

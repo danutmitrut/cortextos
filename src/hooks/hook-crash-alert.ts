@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mk
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+import { WebClient } from '@slack/web-api';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -146,6 +147,11 @@ function shouldSuppressDedup(stateDir: string, endType: string): boolean {
     writeFileSync(dedupFile, JSON.stringify(last), 'utf-8');
   } catch { /* ignore */ }
   return false;
+}
+
+export async function sendSlackCrashAlert(slackBotToken: string, slackChannelId: string, message: string): Promise<void> {
+  const client = new WebClient(slackBotToken);
+  await client.chat.postMessage({ channel: slackChannelId, text: message });
 }
 
 async function main(): Promise<void> {
@@ -308,6 +314,15 @@ async function main(): Promise<void> {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: message }),
       });
+    } catch { /* ignore send failures */ }
+  }
+
+  // Send Slack alert if credentials are configured
+  const slackBotToken = process.env.SLACK_BOT_TOKEN;
+  const slackChannelId = process.env.SLACK_CHANNEL_ID;
+  if (message && slackBotToken && slackChannelId) {
+    try {
+      await sendSlackCrashAlert(slackBotToken, slackChannelId, message);
     } catch { /* ignore send failures */ }
   }
 
