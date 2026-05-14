@@ -39,6 +39,12 @@ describe('bus_inbox', () => {
     const result = await runBusTool('bus_inbox', { agent: 'analyst' }, testDir);
     expect(result).toContain('gol');
   });
+
+  it('gestionate fișiere corupte în inbox', async () => {
+    writeFileSync(join(testDir, 'inbox', 'maestro', 'corrupt.json'), 'NOT JSON{{');
+    const result = await runBusTool('bus_inbox', { agent: 'maestro' }, testDir);
+    expect(result).toContain('corupt');
+  });
 });
 
 describe('bus_read_all_heartbeats', () => {
@@ -62,6 +68,12 @@ describe('bus_read_all_heartbeats', () => {
     const result = await runBusTool('bus_read_all_heartbeats', {}, testDir);
     expect(result).toContain('maestro');
     expect(result).toContain('idle');
+  });
+
+  it('gestionate heartbeat corupt', async () => {
+    writeFileSync(join(testDir, 'state', 'maestro', 'heartbeat.json'), 'INVALID{{');
+    const result = await runBusTool('bus_read_all_heartbeats', {}, testDir);
+    expect(result).toContain('corupt');
   });
 });
 
@@ -100,8 +112,17 @@ describe('bus_list_tasks', () => {
 
   it('returnează mesaj clar dacă nu există orgs', async () => {
     const emptyDir = mkdtempSync(join(tmpdir(), 'mcp-tasks-empty-'));
-    const result = await runBusTool('bus_list_tasks', {}, emptyDir);
-    expect(result).toContain('Niciun task');
-    rmSync(emptyDir, { recursive: true, force: true });
+    try {
+      const result = await runBusTool('bus_list_tasks', {}, emptyDir);
+      expect(result).toContain('Niciun task');
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it('gestionate task corupt', async () => {
+    writeFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'corrupt.json'), 'BAD JSON{{');
+    const result = await runBusTool('bus_list_tasks', {}, testDir);
+    expect(result).toContain('corupt');
   });
 });

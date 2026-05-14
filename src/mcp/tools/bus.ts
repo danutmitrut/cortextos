@@ -41,7 +41,10 @@ export async function runBusTool(
   const root = ctxRoot ?? join(homedir(), '.cortextos', 'default');
 
   if (name === 'bus_inbox') {
-    const agentName = args.agent as string;
+    const agentName = args.agent;
+    if (typeof agentName !== 'string' || agentName.trim() === '') {
+      return 'Parametrul "agent" lipsește sau nu este valid.';
+    }
     const inboxDir = join(root, 'inbox', agentName);
     if (!existsSync(inboxDir)) return `Inbox-ul agentului "${agentName}" e gol sau nu există.`;
 
@@ -73,7 +76,7 @@ export async function runBusTool(
       if (!existsSync(hbPath)) return `${agent}: fără heartbeat`;
       try {
         const hb = JSON.parse(readFileSync(hbPath, 'utf-8'));
-        return `${agent}: ${hb.status} | task: ${hb.current_task || '—'} | ${hb.last_heartbeat}`;
+        return `${agent}: ${hb.status} | task: ${hb.current_task || '-'} | ${hb.last_heartbeat}`;
       } catch {
         return `${agent}: heartbeat corupt`;
       }
@@ -86,7 +89,8 @@ export async function runBusTool(
     if (!existsSync(orgsDir)) return 'Niciun task în bus.';
 
     const results: string[] = [];
-    for (const org of readdirSync(orgsDir)) {
+    for (const entry of readdirSync(orgsDir, { withFileTypes: true }).filter(e => e.isDirectory())) {
+      const org = entry.name;
       const taskDir = join(orgsDir, org, 'tasks');
       if (!existsSync(taskDir)) continue;
       for (const file of readdirSync(taskDir).filter(f => f.endsWith('.json'))) {
