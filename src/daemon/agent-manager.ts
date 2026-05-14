@@ -514,30 +514,47 @@ export class AgentManager {
 
     // Start Slack poller if credentials are available
     if (slackBotToken && slackAppToken && slackChannelId) {
-      const slackPoller = new SlackPoller(slackAppToken);
+      // Security: SLACK_ALLOWED_USER is required for inbound Slack.
+      // Without it, anyone who messages the bot can control the agent.
+      // Fail closed: refuse to start the poller if SLACK_ALLOWED_USER is missing.
+      if (!slackAllowedUserId) {
+        log(`SECURITY: SLACK_APP_TOKEN is set but SLACK_ALLOWED_USER is missing. Refusing to start Slack poller. Set SLACK_ALLOWED_USER to your Slack user ID in .env.`);
+      } else {
+        const slackPoller = new SlackPoller(slackAppToken);
 
-      slackPoller.onMessage((event) => {
-        // SLACK_ALLOWED_USER gate: ignore messages from other users
-        if (slackAllowedUserId && event.user !== slackAllowedUserId) {
-          log(`Ignoring Slack message from unauthorized user (allowed_user gate)`);
-          return;
-        }
+        slackPoller.onMessage((event) => {
+          // SLACK_ALLOWED_USER gate: ignore messages from other users
+          if (event.user !== slackAllowedUserId) {
+            log(`Ignoring Slack message from unauthorized user (allowed_user gate)`);
+            return;
+          }
 
-        logInboundSlack(this.ctxRoot, name, event);
+          // Ignore messages from other channels
+          if (event.channel !== slackChannelId) {
+            log(`Ignoring Slack message from unexpected channel ${event.channel} (expected ${slackChannelId})`);
+            return;
+          }
 
-        const text = event.text ?? '';
-        const formatted = `Slack message from ${event.user ?? 'unknown'}: ${text}`;
-        checker.queueTelegramMessage(formatted);
-      });
+          logInboundSlack(this.ctxRoot, name, event);
 
-      slackPoller.start().catch(err => {
-        log(`Slack poller error: ${err}`);
-      });
+          const text = event.text ?? '';
+          const formatted = [
+            `=== SLACK from ${event.user ?? 'unknown'} (channel:${event.channel}) ===`,
+            text,
+            `Reply using: cortextos bus send-user "<your reply>"`,
+          ].join('\n');
+          checker.queueTelegramMessage(formatted);
+        });
 
-      const entry = this.agents.get(name);
-      if (entry) entry.slackPoller = slackPoller;
+        slackPoller.start().catch(err => {
+          log(`Slack poller error: ${err}`);
+        });
 
-      log('Slack poller started');
+        const entry = this.agents.get(name);
+        if (entry) entry.slackPoller = slackPoller;
+
+        log('Slack poller started');
+      }
     }
   }
 

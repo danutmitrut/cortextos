@@ -504,14 +504,15 @@ describe('AgentManager Slack integration', () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
-  it('Slack poller starts when SLACK credentials present', async () => {
-    // Write .env with all required Slack credentials
+  it('Slack poller starts when SLACK credentials present (including SLACK_ALLOWED_USER)', async () => {
+    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
     writeFileSync(
       join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
       [
         'SLACK_BOT_TOKEN=xoxb-test-token',
         'SLACK_APP_TOKEN=xapp-test-token',
         'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U111222333',
       ].join('\n'),
     );
 
@@ -527,13 +528,14 @@ describe('AgentManager Slack integration', () => {
   });
 
   it('Slack message injected into checker as formatted string', async () => {
-    // Write .env with all required Slack credentials
+    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
     writeFileSync(
       join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
       [
         'SLACK_BOT_TOKEN=xoxb-test-token',
         'SLACK_APP_TOKEN=xapp-test-token',
         'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U99999',
       ].join('\n'),
     );
 
@@ -555,18 +557,24 @@ describe('AgentManager Slack integration', () => {
       ts: '1234567890.000000',
     });
 
-    // Checker must receive the message formatted as "Slack message from <user>: <text>"
-    expect(queueSpy).toHaveBeenCalledWith('Slack message from U99999: Hello from Slack');
+    // Checker must receive the message formatted with the new multi-line format
+    expect(queueSpy).toHaveBeenCalledWith(
+      expect.stringContaining('=== SLACK from U99999 (channel:C12345678) ==='),
+    );
+    expect(queueSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Hello from Slack'),
+    );
   });
 
   it('Slack poller stopped on stopAgent', async () => {
-    // Write .env with all required Slack credentials
+    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
     writeFileSync(
       join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
       [
         'SLACK_BOT_TOKEN=xoxb-test-token',
         'SLACK_APP_TOKEN=xapp-test-token',
         'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U111222333',
       ].join('\n'),
     );
 
@@ -580,5 +588,89 @@ describe('AgentManager Slack integration', () => {
     // Stop the agent and verify slackPoller.stop() was called
     await am.stopAgent('alice');
     expect(mockSlackPollerStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores Slack messages from wrong channel', async () => {
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
+      [
+        'SLACK_BOT_TOKEN=xoxb-test-token',
+        'SLACK_APP_TOKEN=xapp-test-token',
+        'SLACK_CHANNEL_ID=C111',
+        'SLACK_ALLOWED_USER=U99999',
+      ].join('\n'),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    const entry = (am as any).agents.get('alice');
+    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
+
+    expect(capturedSlackMessageHandler).toBeDefined();
+    capturedSlackMessageHandler!({
+      type: 'message',
+      channel: 'C999',
+      user: 'U99999',
+      text: 'Message from wrong channel',
+      ts: '1234567890.000000',
+    });
+
+    // Message from a different channel must be silently dropped
+    expect(queueSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not start Slack poller when SLACK_ALLOWED_USER is missing', async () => {
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
+      [
+        'SLACK_BOT_TOKEN=xoxb-test-token',
+        'SLACK_APP_TOKEN=xapp-test-token',
+        'SLACK_CHANNEL_ID=C12345678',
+        // SLACK_ALLOWED_USER intentionally absent
+      ].join('\n'),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    // Poller must not start when SLACK_ALLOWED_USER is missing
+    expect(mockSlackPollerStart).not.toHaveBeenCalled();
+    // No onMessage handler should have been registered
+    expect(mockSlackPollerOnMessage).not.toHaveBeenCalled();
+  });
+
+  it('formats injected Slack message with reply directive', async () => {
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
+      [
+        'SLACK_BOT_TOKEN=xoxb-test-token',
+        'SLACK_APP_TOKEN=xapp-test-token',
+        'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U99999',
+      ].join('\n'),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    const entry = (am as any).agents.get('alice');
+    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
+
+    expect(capturedSlackMessageHandler).toBeDefined();
+    capturedSlackMessageHandler!({
+      type: 'message',
+      channel: 'C12345678',
+      user: 'U99999',
+      text: 'Hello agent',
+      ts: '1234567890.000000',
+    });
+
+    expect(queueSpy).toHaveBeenCalledTimes(1);
+    const injected: string = queueSpy.mock.calls[0][0];
+    expect(injected).toContain('Reply using:');
   });
 });
