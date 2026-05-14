@@ -46,6 +46,14 @@ describe('admin_crons', () => {
     const result = await runAdminTool('admin_crons', { agent: 'empty-agent' }, testDir);
     expect(result).toContain('nu are cronograme');
   });
+
+  it('returnează eroare dacă config.json este corupt', async () => {
+    const agentDir = join(testDir, 'orgs', 'dm-brain-orchestra', 'agents', 'corrupt-agent');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, 'config.json'), 'NOT VALID JSON {{{');
+    const result = await runAdminTool('admin_crons', { agent: 'corrupt-agent' }, testDir);
+    expect(result).toContain('corupt');
+  });
 });
 
 describe('admin_metrics', () => {
@@ -63,6 +71,7 @@ describe('admin_metrics', () => {
 
   afterEach(() => {
     rmSync(testDir, { recursive: true, force: true });
+    delete process.env.CTX_FRAMEWORK_ROOT;
   });
 
   it('returnează metrici pentru un agent specific', async () => {
@@ -74,5 +83,51 @@ describe('admin_metrics', () => {
   it('returnează metrici pentru toți agenții dacă agent lipsește', async () => {
     const result = await runAdminTool('admin_metrics', {}, testDir);
     expect(result).toContain('maestro');
+  });
+
+  it('gestionează heartbeat corupt', async () => {
+    writeFileSync(join(testDir, 'state', 'maestro', 'heartbeat.json'), '{invalid json');
+    const result = await runAdminTool('admin_metrics', { agent: 'maestro' }, testDir);
+    expect(result).toBeTruthy();
+  });
+});
+
+describe('admin_logs', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'mcp-logs-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('returnează un string pentru orice agent (pm2 disponibil sau nu)', async () => {
+    // Either pm2 is available (returns logs) or not (returns friendly error)
+    const result = await runAdminTool('admin_logs', { agent: 'nonexistent-agent-xyz' }, testDir);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+  });
+});
+
+describe('admin_restart', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'mcp-restart-test-'));
+    process.env.CTX_FRAMEWORK_ROOT = testDir;
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    delete process.env.CTX_FRAMEWORK_ROOT;
+  });
+
+  it('returnează un string (eroare dacă CLI lipsește)', async () => {
+    // dist/cli.js does not exist in testDir, so restart should fail gracefully
+    const result = await runAdminTool('admin_restart', { agent: 'maestro' }, testDir);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
   });
 });
