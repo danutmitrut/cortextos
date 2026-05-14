@@ -165,3 +165,25 @@ cortextOS has undergone a dedicated security hardening sprint covering prompt in
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+---
+
+## Claude Code Integration (MCP)
+
+To use cortextos tools directly in Claude Code (VS Code):
+
+1. Build the project: `npm run build`
+2. Add to `~/.claude/settings.json`:
+
+```json
+"mcpServers": {
+  "cortextos": {
+    "command": "node",
+    "args": ["/absolute/path/to/cortextos/dist/mcp/index.js"]
+  }
+}
+```
+
+3. Reload VS Code window.
+
+Available tools: `agent_send`, `agent_list`, `agent_status`, `bus_inbox`, `bus_read_all_heartbeats`, `bus_list_tasks`, `task_list`, `task_approve`, `task_reject`, `task_create`, `admin_logs`, `admin_crons`, `admin_restart`, `admin_metrics`.
