@@ -22,7 +22,7 @@ src/slack/
 |---|---|
 | `src/daemon/agent-manager.ts` | citeste SLACK_* din .env, instantiaza SlackAPI + SlackPoller, porneste in paralel cu Telegram |
 | `src/bus/system.ts` | adauga comanda `send-message` care ruteaza catre toate canalele configurate |
-| `src/hooks/hook-crash-alert.ts` | trimite alerta si pe Slack daca e configurat |
+| `src/hooks/hook-crash-alert.ts` | citeste `SLACK_BOT_TOKEN`/`SLACK_CHANNEL_ID` din .env (acelasi pattern ca `BOT_TOKEN`), trimite alerta si pe Slack daca sunt prezente |
 | `package.json` | adauga `@slack/web-api` si `@slack/socket-mode` |
 | `templates/orchestrator/AGENTS.md` | inlocuieste `send-telegram` cu `send-message` |
 | `templates/analyst/AGENTS.md` | inlocuieste `send-telegram` cu `send-message` |
@@ -106,6 +106,16 @@ tests/unit/slack/api.test.ts       — mock fetch, sendMessage, rate limiting
 tests/unit/slack/poller.test.ts    — mock Socket Mode, ALLOWED_USER gate, routing
 tests/unit/bus/send-message.test.ts — routing catre Telegram, Slack, ambele, niciunul
 ```
+
+## Reversibilitate
+
+Integrarea Slack este **pur aditiva** - nu modifica niciun comportament existent. Revenirea la configuratia de baza se face in doua moduri:
+
+**Dezactivare per agent** - stergi sau comentezi liniile `SLACK_*` din `.env`. Agentul porneste fara Slack, Telegram functioneaza neschimbat.
+
+**Dezactivare completa** - stergi `src/slack/`, revii la `send-telegram` in templates, scoti dependintele din `package.json`. Sistemul revine exact la starea initiala, fara urme.
+
+Codul Telegram si logica de bus existenta nu se modifica structural - Slack e un listener adaugat in paralel, nu un inlocuitor.
 
 ## Dependinte noi
 
