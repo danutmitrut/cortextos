@@ -17,7 +17,7 @@ export const BUS_TOOLS: Tool[] = [
   },
   {
     name: 'bus_read_all_heartbeats',
-    description: 'Returnează heartbeat-urile tuturor agenților activi — status, task curent, last ping.',
+    description: 'Returnează heartbeat-urile tuturor agenților activi (status, task curent, last ping).',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -97,7 +97,7 @@ export async function runBusTool(
         try {
           const task = JSON.parse(readFileSync(join(taskDir, file), 'utf-8'));
           if (agent && task.agent !== agent) continue;
-          results.push(`[${task.status}] ${task.title} — agent: ${task.agent ?? '—'}`);
+          results.push(`[${task.status}] ${task.title} - agent: ${task.agent ?? '-'}`);
         } catch {
           results.push(`(task corupt: ${file})`);
         }
