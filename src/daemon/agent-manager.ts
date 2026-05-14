@@ -541,7 +541,7 @@ export class AgentManager {
           const formatted = [
             `=== SLACK from ${event.user ?? 'unknown'} (channel:${event.channel}) ===`,
             text,
-            `Reply using: cortextos bus send-user "<your reply>"`,
+            `Reply using: cortextos bus send-slack ${event.channel} "<your reply>"`,
           ].join('\n');
           checker.queueTelegramMessage(formatted);
         });

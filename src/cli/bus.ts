@@ -1117,6 +1117,44 @@ busCommand
   });
 
 busCommand
+  .command('send-slack')
+  .description('Send a message to a Slack channel')
+  .argument('<channel-id>', 'Slack channel ID (C...)')
+  .argument('<message>', 'Message text')
+  .action(async (channelId: string, message: string) => {
+    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    const env = resolveEnv();
+    let slackBotToken = '';
+
+    if (env.agentDir) {
+      const agentEnvPath = join(env.agentDir, '.env');
+      if (existsSync(agentEnvPath)) {
+        const content = readFileSync(agentEnvPath, 'utf-8');
+        const match = content.match(/^SLACK_BOT_TOKEN=(.+)$/m);
+        if (match?.[1]?.trim()) slackBotToken = match[1].trim();
+      }
+    }
+    if (!slackBotToken) slackBotToken = process.env.SLACK_BOT_TOKEN ?? '';
+
+    if (!slackBotToken) {
+      console.error('Error: SLACK_BOT_TOKEN not configured. Set it in your agent .env file to enable Slack.');
+      process.exit(1);
+    }
+
+    const slackApi = new SlackAPIClass(slackBotToken);
+    try {
+      const ts = await slackApi.sendMessage(channelId, message);
+      if (env.agentName && env.ctxRoot) {
+        logOutboundSlack(env.ctxRoot, env.agentName, channelId, message, ts);
+      }
+      console.log('Message sent');
+    } catch (err: any) {
+      console.error(`Failed to send: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
   .command('create-approval')
   .description('Request human approval for a high-stakes action')
   .argument('<title>', 'What you are requesting approval for')
