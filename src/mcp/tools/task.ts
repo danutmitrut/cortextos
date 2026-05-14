@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { atomicWriteSync } from '../../utils/atomic.js';
@@ -208,7 +208,10 @@ export async function runTaskTool(
     if (!agentEntry) {
       return `Agentul "${agentName}" nu este configurat in enabled-agents.json.`;
     }
-    const org = agentEntry.org;
+    const org = agentEntry?.org;
+    if (typeof org !== 'string' || org.trim() === '') {
+      return `Agentul "${agentName}" nu are un org valid in enabled-agents.json.`;
+    }
 
     const taskId = `task_${randomString(8)}`;
     const now = new Date().toISOString();
@@ -226,9 +229,6 @@ export async function runTaskTool(
 
     const taskDir = join(root, 'orgs', org, 'tasks');
     const filePath = join(taskDir, `${taskId}.json`);
-    // atomicWriteSync creates the dir internally, but we mkdirSync explicitly
-    // so the directory exists before the write (belt-and-suspenders).
-    const { mkdirSync } = await import('fs');
     mkdirSync(taskDir, { recursive: true });
     atomicWriteSync(filePath, JSON.stringify(task, null, 2));
 

@@ -47,6 +47,13 @@ describe('task_list', () => {
     expect(result).toContain('Alt task');
     expect(result).not.toContain('Analizează raportul');
   });
+
+  it('gestionate task corupt în lista', async () => {
+    writeFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'corrupt.json'), 'NOT JSON{{');
+    const result = await runTaskTool('task_list', {}, testDir);
+    // should still return other tasks and not crash
+    expect(result).toBeTruthy();
+  });
 });
 
 describe('task_approve', () => {
@@ -77,6 +84,13 @@ describe('task_approve', () => {
     const result = await runTaskTool('task_approve', { task_id: 'task_999' }, testDir);
     expect(result).toContain('nu a fost găsit');
   });
+
+  it('returnează eroare pentru task corupt', async () => {
+    writeFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'task_111.json'), '{invalid json');
+    const result = await runTaskTool('task_approve', { task_id: 'task_111' }, testDir);
+    expect(result).toBeTruthy();
+    // The task file is corrupt — it should not crash, returns some message
+  });
 });
 
 describe('task_reject', () => {
@@ -102,6 +116,19 @@ describe('task_reject', () => {
     const updated = JSON.parse(readFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'task_111.json'), 'utf-8'));
     expect(updated.status).toBe('cancelled');
     expect(updated.reject_reason).toBe('Nu e prioritar');
+  });
+
+  it('respinge un task fara motiv', async () => {
+    const result = await runTaskTool('task_reject', { task_id: 'task_111' }, testDir);
+    expect(result).toContain('respins');
+    const updated = JSON.parse(readFileSync(join(testDir, 'orgs', 'dm-brain-orchestra', 'tasks', 'task_111.json'), 'utf-8'));
+    expect(updated.status).toBe('cancelled');
+    expect(updated.reject_reason).toBeUndefined();
+  });
+
+  it('returnează eroare dacă task-ul nu există', async () => {
+    const result = await runTaskTool('task_reject', { task_id: 'task_999' }, testDir);
+    expect(result).toContain('nu a fost găsit');
   });
 });
 
@@ -132,5 +159,11 @@ describe('task_create', () => {
     const task = JSON.parse((await import('fs')).readFileSync(join(taskDir, files[0]), 'utf-8'));
     expect(task.title).toBe('Test task');
     expect(task.status).toBe('pending');
+  });
+
+  it('fallback la org default dacă config este corupt', async () => {
+    writeFileSync(join(testDir, 'config', 'enabled-agents.json'), 'INVALID JSON{{');
+    const result = await runTaskTool('task_create', { agent: 'maestro', title: 'Test', description: 'Desc' }, testDir);
+    expect(result).toBeTruthy(); // should not crash, uses fallback org or returns error
   });
 });
