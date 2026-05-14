@@ -39,7 +39,7 @@ function scanInboxForReply(inboxDir: string, replyToId: string): string | null {
       const msg = JSON.parse(raw);
       if (msg.reply_to === replyToId) return msg.text as string;
     } catch {
-      // fișier corupt sau în scriere — skip
+      // fisier corupt sau in scriere, skip
     }
   }
 

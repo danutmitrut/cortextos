@@ -76,6 +76,8 @@ export async function runAdminTool(
   args: Record<string, unknown>,
   ctxRoot?: string,
 ): Promise<string> {
+  // root = bus data dir (runtime state, inboxes, heartbeats)
+  // frameworkRoot = cortextos install dir (agent configs, CLI binary)
   const root = ctxRoot ?? join(homedir(), '.cortextos', 'default');
   const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT ?? root;
 

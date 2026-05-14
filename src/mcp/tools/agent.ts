@@ -50,15 +50,18 @@ export async function runAgentTool(
     const agents = listAgents(root);
     if (agents.length === 0) return 'Niciun agent configurat.';
     return agents
-      .map(a => `- ${a.name} (org: ${a.org ?? '—'}, enabled: ${a.enabled ? 'da' : 'nu'})`)
+      .map(a => `- ${a.name} (org: ${a.org ?? '-'}, enabled: ${a.enabled ? 'da' : 'nu'})`)
       .join('\n');
   }
 
   if (name === 'agent_status') {
-    const agentName = args.agent as string;
+    const agentName = args.agent;
+    if (typeof agentName !== 'string' || agentName.trim() === '') {
+      return 'Parametrul "agent" lipseste sau nu este valid.';
+    }
     const heartbeatPath = join(root, 'state', agentName, 'heartbeat.json');
     if (!existsSync(heartbeatPath)) {
-      return `Agentul "${agentName}" nu are heartbeat — poate nu rulează.`;
+      return `Agentul "${agentName}" nu are heartbeat (poate nu rulează).`;
     }
     let hb: Record<string, unknown>;
     try {
@@ -69,15 +72,21 @@ export async function runAgentTool(
     return [
       `Agent: ${hb.agent}`,
       `Status: ${hb.status}`,
-      `Task curent: ${hb.current_task || '—'}`,
+      `Task curent: ${hb.current_task || '-'}`,
       `Mod: ${hb.mode}`,
       `Ultimul heartbeat: ${hb.last_heartbeat}`,
     ].join('\n');
   }
 
   if (name === 'agent_send') {
-    const agentName = args.agent as string;
-    const message = args.message as string;
+    const agentName = args.agent;
+    const message = args.message;
+    if (typeof agentName !== 'string' || agentName.trim() === '') {
+      return 'Parametrul "agent" lipseste sau nu este valid.';
+    }
+    if (typeof message !== 'string' || message.trim() === '') {
+      return 'Parametrul "message" lipseste sau nu este valid.';
+    }
     const replyId = `mcp-${randomString(8)}`;
     const instanceId = root.split('/').at(-1) ?? 'default';
     const agentPaths = resolvePaths(agentName, instanceId);
