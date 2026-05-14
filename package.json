@@ -8,8 +8,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "mcp": "node dist/mcp/index.js",
-    "dev": "tsup --watch",
+"dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:codex": "vitest run tests/e2e/lifecycle-codex.test.ts tests/integration/multi-agent-crons-codex.test.ts tests/integration/codex-bus-roundtrip.test.ts tests/integration/codex-handoff-lifecycle.test.ts tests/integration/fleet-health-mixed-codex-claude.test.ts dashboard/src/lib/__tests__/cost-parser-codex.test.ts",
@@ -44,8 +43,7 @@
   ],
   "dependencies": {
     "@inquirer/prompts": "^8.3.2",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "chalk": "^5.6.2",
+"chalk": "^5.6.2",
     "chokidar": "^5.0.0",
     "commander": "^14.0.3",
     "node-pty": "^1.1.0",
