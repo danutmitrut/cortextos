@@ -79,7 +79,8 @@ export async function runAgentTool(
     const agentName = args.agent as string;
     const message = args.message as string;
     const replyId = `mcp-${randomString(8)}`;
-    const agentPaths = { ...resolvePaths(agentName, 'default'), ctxRoot: root };
+    const instanceId = root.split('/').at(-1) ?? 'default';
+    const agentPaths = resolvePaths(agentName, instanceId);
 
     sendMessage(agentPaths, 'cli', agentName, 'urgent', message, replyId);
 

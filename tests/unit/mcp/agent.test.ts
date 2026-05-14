@@ -65,4 +65,11 @@ describe('agent_status', () => {
     const result = await runAgentTool('agent_status', { agent: 'inexistent' }, testDir);
     expect(result).toContain('nu are heartbeat');
   });
+
+  it('returnează eroare dacă heartbeat-ul este corupt', async () => {
+    const stateDir = join(testDir, 'state', 'maestro');
+    writeFileSync(join(stateDir, 'heartbeat.json'), 'not valid json{{');
+    const result = await runAgentTool('agent_status', { agent: 'maestro' }, testDir);
+    expect(result).toContain('heartbeat corupt');
+  });
 });
