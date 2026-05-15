@@ -2542,10 +2542,16 @@ busCommand
   .option('--account <name>', 'Check specific account (default: active account)')
   .option('--force', 'Bypass cache and fetch fresh data')
   .option('--json', 'Output as JSON')
-  .action(async (opts: { account?: string; force?: boolean; json?: boolean }) => {
+  .option('--warn-5h <pct>', 'Print Warning if 5h utilization >= this percent (default: 90)', '90')
+  .option('--warn-7day <pct>', 'Print CODE RED if 7-day utilization >= this percent (default: 80)', '80')
+  .option('--chat-id <id>', 'Accepted for compatibility (alerts are printed to stdout for cron handling)')
+  .action(async (opts: { account?: string; force?: boolean; json?: boolean; warn5h?: string; warn7day?: string; chatId?: string }) => {
     const env = resolveEnv();
     try {
       const result = await checkUsageApi(env.ctxRoot, { force: opts.force, account: opts.account });
+      const threshold5h = parseFloat(opts.warn5h ?? '90') / 100;
+      const threshold7day = parseFloat(opts.warn7day ?? '80') / 100;
+
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -2556,6 +2562,12 @@ busCommand
         console.log(`5h utilization:  ${pct(result.five_hour_utilization)}${warn5h}`);
         console.log(`7d utilization:  ${pct(result.seven_day_utilization)}${warn7d}`);
         console.log(`Fetched at: ${result.fetched_at}`);
+
+        if (result.seven_day_utilization >= threshold7day) {
+          console.log(`CODE RED: 7-day usage at ${pct(result.seven_day_utilization)}. Reduce agent activity or pause non-critical crons.`);
+        } else if (result.five_hour_utilization >= threshold5h) {
+          console.log(`Warning: 5h window at ${pct(result.five_hour_utilization)}.`);
+        }
       }
     } catch (err) {
       console.error(`Error: ${err}`);
