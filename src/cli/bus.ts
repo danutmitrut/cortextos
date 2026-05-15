@@ -18,7 +18,7 @@ import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-stat
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
-import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, syncOAuthFromKeychain, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
@@ -2630,6 +2630,27 @@ busCommand
       const warn7d = acct.seven_day_utilization >= ALERT_7D ? ' ⚠️' : '';
       console.log(`${name}${active}`);
       console.log(`  5h: ${pct(acct.five_hour_utilization)}${warn5h}  7d: ${pct(acct.seven_day_utilization)}${warn7d}  expires: ${expiry}`);
+    }
+  });
+
+busCommand
+  .command('sync-oauth-from-keychain')
+  .description('Sync OAuth tokens from macOS Keychain into accounts.json (idempotent — safe to run on a cron)')
+  .action((opts: Record<string, unknown>) => {
+    const env = resolveEnv();
+    try {
+      const result = syncOAuthFromKeychain(env.ctxRoot);
+      if (result.updated) {
+        const expiresIn = result.expires_at
+          ? Math.round((result.expires_at - Date.now()) / 1000 / 60)
+          : 0;
+        console.log(`Token synced from Keychain. Expires in: ${expiresIn} minutes`);
+      } else {
+        console.log(`No update needed: ${result.reason}`);
+      }
+    } catch (err) {
+      console.error(`Error: ${err}`);
+      process.exit(1);
     }
   });
 

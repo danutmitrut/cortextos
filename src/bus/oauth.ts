@@ -15,6 +15,7 @@
 import { existsSync, readFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { execSync } from 'child_process';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 
 // --- Types ---
@@ -408,6 +409,71 @@ export async function rotateOAuth(
     reason: logEntry.reason,
     from: currentName,
     to: nextName,
+  };
+}
+
+// --- sync-oauth-from-keychain ---
+
+/**
+ * Sync OAuth tokens from macOS Keychain into accounts.json.
+ * Claude Code owns the Keychain — this keeps accounts.json current
+ * without consuming one-time-use refresh tokens out of turn.
+ */
+export function syncOAuthFromKeychain(
+  ctxRoot: string,
+): { updated: boolean; reason: string; expires_at?: number } {
+  let raw: string;
+  try {
+    raw = execSync('security find-generic-password -s "Claude Code-credentials" -w', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    return { updated: false, reason: 'Claude Code credentials not found in Keychain' };
+  }
+
+  let keychainOAuth: { accessToken?: string; refreshToken?: string; expiresAt?: number };
+  try {
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: typeof keychainOAuth };
+    keychainOAuth = parsed?.claudeAiOauth ?? {};
+  } catch {
+    return { updated: false, reason: 'Failed to parse Keychain credentials JSON' };
+  }
+
+  const { accessToken, refreshToken, expiresAt } = keychainOAuth;
+  if (!accessToken) return { updated: false, reason: 'No accessToken in Keychain credentials' };
+
+  const store = loadAccounts(ctxRoot) ?? {
+    active: 'default',
+    accounts: {},
+    rotation_log: [],
+  };
+
+  const existing = store.accounts['default'];
+  if (existing?.access_token === accessToken) {
+    return { updated: false, reason: 'Token unchanged', expires_at: existing.expires_at };
+  }
+
+  store.accounts['default'] = {
+    label: existing?.label ?? 'Claude Max (synced from Keychain)',
+    access_token: accessToken,
+    refresh_token: refreshToken ?? existing?.refresh_token ?? '',
+    expires_at: expiresAt ?? existing?.expires_at ?? Date.now() + 3600 * 1000,
+    last_refreshed: new Date().toISOString(),
+    five_hour_utilization: existing?.five_hour_utilization ?? 0,
+    seven_day_utilization: existing?.seven_day_utilization ?? 0,
+  };
+  if (!store.active) store.active = 'default';
+
+  ensureDir(join(ctxRoot, 'state', 'oauth'));
+  const path = accountsPath(ctxRoot);
+  atomicWriteSync(path, JSON.stringify(store, null, 2));
+  try { chmodSync(path, 0o600); } catch { /* ignore */ }
+
+  return {
+    updated: true,
+    reason: 'Token synced from Keychain',
+    expires_at: store.accounts['default'].expires_at,
   };
 }
 
