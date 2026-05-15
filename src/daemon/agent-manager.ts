@@ -523,6 +523,10 @@ export class AgentManager {
         const slackPoller = new SlackPoller(slackAppToken, slackBotToken);
 
         slackPoller.onMessage((event) => {
+          // Lookup dinamic: orice poller acumulat de BUG-011 injecteaza in checker-ul curent
+          const currentEntry = this.agents.get(name);
+          if (!currentEntry) return;
+
           // SLACK_ALLOWED_USER gate: ignore messages from other users
           if (event.user !== slackAllowedUserId) {
             log(`Ignoring Slack message from unauthorized user (allowed_user gate)`);
@@ -535,6 +539,7 @@ export class AgentManager {
             return;
           }
 
+          log(`Slack message received from ${event.user} (channel:${event.channel})`);
           logInboundSlack(this.ctxRoot, name, event);
 
           const text = event.text ?? '';
@@ -543,7 +548,7 @@ export class AgentManager {
             text,
             `Reply using: cortextos bus send-slack ${event.channel} "<your reply>"`,
           ].join('\n');
-          checker.queueTelegramMessage(formatted);
+          currentEntry.checker.queueTelegramMessage(formatted);
         });
 
         slackPoller.start().then(() => {
@@ -552,6 +557,8 @@ export class AgentManager {
           return slackPoller.fetchHistory(slackChannelId, oldestSeconds);
         }).then(missed => {
           if (missed.length > 0) log(`Slack catch-up: ${missed.length} mesaj(e) ratate`);
+          const currentEntry = this.agents.get(name);
+          if (!currentEntry) return;
           for (const event of missed) {
             if (event.user !== slackAllowedUserId) continue;
             logInboundSlack(this.ctxRoot, name, event);
@@ -561,7 +568,7 @@ export class AgentManager {
               text,
               `Reply using: cortextos bus send-slack ${event.channel} "<your reply>"`,
             ].join('\n');
-            if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+            if (!currentEntry.checker.isDuplicate(formatted)) currentEntry.checker.queueTelegramMessage(formatted);
           }
         }).catch(err => {
           log(`Slack poller/catch-up error: ${err}`);
