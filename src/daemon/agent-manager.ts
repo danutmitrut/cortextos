@@ -520,7 +520,7 @@ export class AgentManager {
       if (!slackAllowedUserId) {
         log(`SECURITY: SLACK_APP_TOKEN is set but SLACK_ALLOWED_USER is missing. Refusing to start Slack poller. Set SLACK_ALLOWED_USER to your Slack user ID in .env.`);
       } else {
-        const slackPoller = new SlackPoller(slackAppToken);
+        const slackPoller = new SlackPoller(slackAppToken, slackBotToken);
 
         slackPoller.onMessage((event) => {
           // SLACK_ALLOWED_USER gate: ignore messages from other users
@@ -546,8 +546,25 @@ export class AgentManager {
           checker.queueTelegramMessage(formatted);
         });
 
-        slackPoller.start().catch(err => {
-          log(`Slack poller error: ${err}`);
+        slackPoller.start().then(() => {
+          // Catch-up: injecteaza mesajele ratate din ultimele 30 de minute
+          const oldestSeconds = Math.floor(Date.now() / 1000) - 1800;
+          return slackPoller.fetchHistory(slackChannelId, oldestSeconds);
+        }).then(missed => {
+          if (missed.length > 0) log(`Slack catch-up: ${missed.length} mesaj(e) ratate`);
+          for (const event of missed) {
+            if (event.user !== slackAllowedUserId) continue;
+            logInboundSlack(this.ctxRoot, name, event);
+            const text = event.text ?? '';
+            const formatted = [
+              `=== SLACK from ${event.user ?? 'unknown'} (channel:${event.channel}) ===`,
+              text,
+              `Reply using: cortextos bus send-slack ${event.channel} "<your reply>"`,
+            ].join('\n');
+            if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+          }
+        }).catch(err => {
+          log(`Slack poller/catch-up error: ${err}`);
         });
 
         const entry = this.agents.get(name);
