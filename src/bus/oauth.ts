@@ -217,6 +217,8 @@ export async function checkUsageApi(
   }
 
   const data = await response.json() as {
+    five_hour?: { utilization?: number };
+    seven_day?: { utilization?: number };
     five_hour_utilization?: number;
     seven_day_utilization?: number;
     fiveHourUtilization?: number;
@@ -229,8 +231,12 @@ export async function checkUsageApi(
     return v > 1 ? v / 100 : v;
   };
 
-  const fiveHour = normalize(data.five_hour_utilization ?? data.fiveHourUtilization);
-  const sevenDay = normalize(data.seven_day_utilization ?? data.sevenDayUtilization);
+  const fiveHour = normalize(
+    data.five_hour?.utilization ?? data.five_hour_utilization ?? data.fiveHourUtilization,
+  );
+  const sevenDay = normalize(
+    data.seven_day?.utilization ?? data.seven_day_utilization ?? data.sevenDayUtilization,
+  );
   const fetchedAt = new Date().toISOString();
 
   const snapshot: UsageSnapshot = {
