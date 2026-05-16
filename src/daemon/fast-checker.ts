@@ -400,6 +400,93 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   }
 
   /**
+   * Format a Slack photo message for injection. Parallel to
+   * formatTelegramPhotoMessage but with a Slack header and a send-slack
+   * reply directive so the agent replies on the right transport.
+   */
+  static formatSlackPhotoMessage(
+    from: string,
+    channel: string,
+    caption: string,
+    imagePath: string,
+  ): string {
+    return `=== SLACK PHOTO from ${from} (channel:${channel}) ===
+caption:
+\`\`\`
+${caption}
+\`\`\`
+local_file: ${imagePath}
+Reply using: cortextos bus send-slack ${channel} "<your reply>"
+
+`;
+  }
+
+  /**
+   * Format a Slack document message for injection.
+   */
+  static formatSlackDocumentMessage(
+    from: string,
+    channel: string,
+    caption: string,
+    filePath: string,
+    fileName: string,
+  ): string {
+    return `=== SLACK DOCUMENT from ${from} (channel:${channel}) ===
+caption:
+\`\`\`
+${caption}
+\`\`\`
+local_file: ${filePath}
+file_name: ${fileName}
+Reply using: cortextos bus send-slack ${channel} "<your reply>"
+
+`;
+  }
+
+  /**
+   * Format a Slack voice message for injection. `transcript` is populated by
+   * src/telegram/transcribe.ts (reused) when whisper-cli + model are
+   * available; otherwise it stays undefined and only the audio path is sent.
+   */
+  static formatSlackVoiceMessage(
+    from: string,
+    channel: string,
+    filePath: string,
+    transcript?: string,
+  ): string {
+    const transcriptBlock = transcript && transcript.trim()
+      ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
+      : '';
+    return `=== SLACK VOICE from ${from} (channel:${channel}) ===
+local_file: ${filePath}
+${transcriptBlock}Reply using: cortextos bus send-slack ${channel} "<your reply>"
+
+`;
+  }
+
+  /**
+   * Format a Slack video message for injection.
+   */
+  static formatSlackVideoMessage(
+    from: string,
+    channel: string,
+    caption: string,
+    filePath: string,
+    fileName: string,
+  ): string {
+    return `=== SLACK VIDEO from ${from} (channel:${channel}) ===
+caption:
+\`\`\`
+${caption}
+\`\`\`
+local_file: ${filePath}
+file_name: ${fileName}
+Reply using: cortextos bus send-slack ${channel} "<your reply>"
+
+`;
+  }
+
+  /**
    * Wait for the agent to finish bootstrapping.
    */
   private async waitForBootstrap(timeoutMs: number = 30000): Promise<void> {
