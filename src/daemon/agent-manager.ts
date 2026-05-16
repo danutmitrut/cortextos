@@ -17,7 +17,9 @@ import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { SlackAPI } from '../slack/api.js';
 import { SlackPoller } from '../slack/poller.js';
+import type { SlackMessageEvent } from '../slack/poller.js';
 import { logInboundSlack } from '../slack/logging.js';
+import { processSlackMedia } from '../slack/media.js';
 
 type LogFn = (msg: string) => void;
 
@@ -522,6 +524,45 @@ export class AgentManager {
       } else {
         const slackPoller = new SlackPoller(slackAppToken, slackBotToken);
 
+        const slackMediaApi = new SlackAPI(slackBotToken);
+        const slackDownloadDir = join(agentDir, 'slack-files');
+        const slackLaunchDir = config?.working_directory || agentDir;
+        const slackToRel = (p: string | undefined) => (p ? relative(slackLaunchDir, p) : '');
+
+        // Download every file on a Slack event and inject one formatted
+        // message per file. Returns true when the event carried files (so
+        // the caller skips the plain-text path), false otherwise.
+        const injectSlackMedia = (event: SlackMessageEvent): boolean => {
+          if (!event.files || event.files.length === 0) return false;
+          const currentEntry = this.agents.get(name);
+          if (!currentEntry) return true;
+          processSlackMedia(event, slackMediaApi, slackDownloadDir).then((items) => {
+            const live = this.agents.get(name);
+            if (!live) return;
+            for (const media of items) {
+              let formatted: string;
+              if (media.type === 'photo') {
+                formatted = FastChecker.formatSlackPhotoMessage(media.from, media.channel, media.text, slackToRel(media.image_path));
+              } else if (media.type === 'voice') {
+                formatted = FastChecker.formatSlackVoiceMessage(media.from, media.channel, slackToRel(media.file_path), media.transcript);
+              } else if (media.type === 'video') {
+                formatted = FastChecker.formatSlackVideoMessage(media.from, media.channel, media.text, slackToRel(media.file_path), media.file_name || '');
+              } else {
+                formatted = FastChecker.formatSlackDocumentMessage(media.from, media.channel, media.text, slackToRel(media.file_path), media.file_name || '');
+              }
+              if (live.checker.isDuplicate(formatted)) {
+                log('Duplicate Slack media message suppressed');
+                continue;
+              }
+              log(`Slack media received: type=${media.type}`);
+              live.checker.queueTelegramMessage(formatted);
+            }
+          }).catch((err) => {
+            log(`Slack media processing error: ${err}`);
+          });
+          return true;
+        };
+
         slackPoller.onMessage((event) => {
           // Lookup dinamic: orice poller acumulat de BUG-011 injecteaza in checker-ul curent
           const currentEntry = this.agents.get(name);
@@ -541,6 +582,8 @@ export class AgentManager {
 
           log(`Slack message received from ${event.user} (channel:${event.channel})`);
           logInboundSlack(this.ctxRoot, name, event);
+
+          if (injectSlackMedia(event)) return;
 
           const text = event.text ?? '';
           const formatted = [
@@ -562,6 +605,7 @@ export class AgentManager {
           for (const event of missed) {
             if (event.user !== slackAllowedUserId) continue;
             logInboundSlack(this.ctxRoot, name, event);
+            if (injectSlackMedia(event)) continue;
             const text = event.text ?? '';
             const formatted = [
               `=== SLACK from ${event.user ?? 'unknown'} (channel:${event.channel}) ===`,
