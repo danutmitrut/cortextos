@@ -535,10 +535,28 @@ export class AgentManager {
         const injectSlackMedia = (event: SlackMessageEvent): boolean => {
           if (!event.files || event.files.length === 0) return false;
           const currentEntry = this.agents.get(name);
-          if (!currentEntry) return true;
+          if (!currentEntry) {
+            log('injectSlackMedia: agent entry gone, dropping media event');
+            return true;
+          }
           processSlackMedia(event, slackMediaApi, slackDownloadDir).then((items) => {
             const live = this.agents.get(name);
             if (!live) return;
+            if (items.length === 0) {
+              // All files failed to download or were skipped. Fall back to
+              // the plain-text path so the user's message (and any text sent
+              // alongside the files) still reaches the agent, matching the
+              // Telegram media fallback behavior.
+              log('Slack media: no files downloaded, falling back to text');
+              const text = event.text ?? '';
+              const fallback = [
+                `=== SLACK from ${event.user ?? 'unknown'} (channel:${event.channel}) ===`,
+                text,
+                `Reply using: cortextos bus send-slack ${event.channel} "<your reply>"`,
+              ].join('\n');
+              if (!live.checker.isDuplicate(fallback)) live.checker.queueTelegramMessage(fallback);
+              return;
+            }
             for (const media of items) {
               let formatted: string;
               if (media.type === 'photo') {
@@ -554,7 +572,7 @@ export class AgentManager {
                 log('Duplicate Slack media message suppressed');
                 continue;
               }
-              log(`Slack media received: type=${media.type}`);
+              log(`Slack media received: type=${media.type} path=${slackToRel(media.image_path ?? media.file_path)}`);
               live.checker.queueTelegramMessage(formatted);
             }
           }).catch((err) => {
