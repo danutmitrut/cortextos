@@ -54,7 +54,10 @@ export async function transcribeVoice(
     return null;
   }
 
-  const wavPath = oggPath.replace(/\.ogg$/i, '.wav');
+  // Derive the WAV path from any input extension (Telegram sends .ogg;
+  // Slack voice clips may be .mp4/.m4a/.webm). ffmpeg handles any input
+  // container, so only the output path needs generalizing.
+  const wavPath = oggPath.replace(/\.[^.]+$/, '.wav');
   const ffmpegOk = await runProcess(
     ffmpegBin,
     ['-y', '-i', oggPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath],
