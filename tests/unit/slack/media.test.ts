@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, sep } from 'path';
 import { tmpdir } from 'os';
 import { processSlackMedia } from '../../../src/slack/media';
 import type { SlackMessageEvent } from '../../../src/slack/poller';
@@ -30,6 +30,8 @@ describe('processSlackMedia', () => {
   beforeEach(() => {
     downloadDir = mkdtempSync(join(tmpdir(), 'cortextos-slack-media-'));
     prevNoTranscribe = process.env.CTX_TELEGRAM_NO_TRANSCRIBE;
+    // transcribeVoice is shared with Telegram and gates on this single env
+    // var regardless of transport; this disables Whisper during the tests.
     process.env.CTX_TELEGRAM_NO_TRANSCRIBE = '1';
   });
 
@@ -84,7 +86,7 @@ describe('processSlackMedia', () => {
       mockApi(), downloadDir,
     );
     expect(out[0].type).toBe('document');
-    expect(out[0].file_name).toBe('evilreport.pdf');
+    expect(out[0].file_name).toBe('evilreport_F4.pdf');
     expect(out[0].file_path).toBeDefined();
   });
 
@@ -124,5 +126,33 @@ describe('processSlackMedia', () => {
       mockApi(), downloadDir,
     );
     expect(out).toEqual([]);
+  });
+
+  it('does not let two files with the same name collide', async () => {
+    const api = {
+      downloadFile: vi.fn()
+        .mockResolvedValueOnce(Buffer.from('first'))
+        .mockResolvedValueOnce(Buffer.from('second')),
+    } as any;
+    const out = await processSlackMedia(
+      evt([
+        { id: 'FA', name: 'report.pdf', mimetype: 'application/pdf', filetype: 'pdf', url_private_download: 'https://files/a' },
+        { id: 'FB', name: 'report.pdf', mimetype: 'application/pdf', filetype: 'pdf', url_private_download: 'https://files/b' },
+      ]),
+      api, downloadDir,
+    );
+    expect(out).toHaveLength(2);
+    expect(out[0].file_path).not.toBe(out[1].file_path);
+    expect(readFileSync(out[0].file_path!).toString()).toBe('first');
+    expect(readFileSync(out[1].file_path!).toString()).toBe('second');
+  });
+
+  it('keeps a pathological ".." file name inside the download dir', async () => {
+    const out = await processSlackMedia(
+      evt([{ id: 'FT', name: '..', mimetype: 'image/jpeg', filetype: 'jpg', url_private_download: 'https://files/e.jpg' }]),
+      mockApi(), downloadDir,
+    );
+    expect(out).toHaveLength(1);
+    expect(resolve(out[0].image_path!).startsWith(resolve(downloadDir) + sep)).toBe(true);
   });
 });

@@ -39,14 +39,19 @@ function categorize(mimetype: string | undefined): 'photo' | 'voice' | 'video' |
 }
 
 /**
- * Build a safe local filename for a Slack file. Uses the sanitized original
- * name when present, else synthesizes one from the message ts + filetype.
+ * Build a safe local filename for a Slack file. Always appends the sanitized
+ * file id before the extension so two files with the same name in one
+ * message do not overwrite each other on disk.
  */
 function localName(file: SlackFile, ts: string): string {
-  if (file.name) return sanitizeFilename(file.name);
-  const ext = file.filetype ? `.${sanitizeFilename(file.filetype)}` : '';
-  const safeTs = ts.replace(/[^0-9.]/g, '');
-  return `slackfile_${safeTs}_${sanitizeFilename(file.id)}${ext}`;
+  const base = file.name
+    ? sanitizeFilename(file.name)
+    : `slackfile_${ts.replace(/[^0-9.]/g, '')}_${sanitizeFilename(file.id)}`;
+  const safeId = sanitizeFilename(file.id);
+  const dot = base.lastIndexOf('.');
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : '';
+  return `${stem}_${safeId}${ext}`;
 }
 
 /**
@@ -89,6 +94,12 @@ export async function processSlackMedia(
     const category = categorize(file.mimetype);
     const fileName = localName(file, ts);
     const localFile = path.join(downloadDir, fileName);
+    // Defense in depth: never write outside downloadDir even if a crafted
+    // file name survives sanitization.
+    if (!path.resolve(localFile).startsWith(path.resolve(downloadDir) + path.sep)) {
+      console.error(`[slack-media] file ${file.id} produced unsafe path - skipping`);
+      continue;
+    }
     fs.writeFileSync(localFile, data);
 
     if (category === 'photo') {
