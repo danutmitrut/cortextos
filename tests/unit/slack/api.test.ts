@@ -39,4 +39,34 @@ describe('SlackAPI', () => {
     const api = new SlackAPI('xoxb-test-token');
     await expect(api.sendMessage('C0123456', 'text')).rejects.toThrow('network error');
   });
+
+  it('downloadFile fetcheaza cu header de auth si returneaza Buffer', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode('file-bytes').buffer,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api = new SlackAPI('xoxb-test-token');
+    const buf = await api.downloadFile('https://files.slack.com/x.jpg');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://files.slack.com/x.jpg',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer xoxb-test-token' },
+      }),
+    );
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.toString()).toBe('file-bytes');
+    vi.unstubAllGlobals();
+  });
+
+  it('downloadFile arunca eroare cand raspunsul nu e ok', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const api = new SlackAPI('xoxb-test-token');
+    await expect(api.downloadFile('https://files.slack.com/x.jpg')).rejects.toThrow('403');
+    vi.unstubAllGlobals();
+  });
 });
