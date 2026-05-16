@@ -1,14 +1,26 @@
 import { SocketModeClient, LogLevel } from '@slack/socket-mode';
 import { WebClient } from '@slack/web-api';
 
+export interface SlackFile {
+  id: string;
+  name?: string;
+  mimetype?: string;
+  filetype?: string;
+  url_private_download?: string;
+  url_private?: string;
+  size?: number;
+}
+
 export interface SlackMessageEvent {
   type: string;
+  subtype?: string;
   channel: string;
   user?: string;
   text: string;
   ts: string;
   thread_ts?: string;
   bot_id?: string;
+  files?: SlackFile[];
 }
 
 export type SlackMessageHandler = (event: SlackMessageEvent) => void;
@@ -30,20 +42,31 @@ export class SlackPoller {
       oldest: String(oldestUnixSeconds),
       limit: 20,
     });
-    type RawMsg = { type?: string; user?: string; text?: string; ts?: string; thread_ts?: string; bot_id?: string };
+    type RawMsg = {
+      type?: string;
+      subtype?: string;
+      user?: string;
+      text?: string;
+      ts?: string;
+      thread_ts?: string;
+      bot_id?: string;
+      files?: SlackFile[];
+    };
     const messages = (result.messages ?? []) as RawMsg[];
     return messages
-      .filter(m => m.user && !m.bot_id && m.text && m.ts)
+      .filter(m => m.user && !m.bot_id && m.ts && (m.text || (m.files && m.files.length > 0)))
       .map(m => ({
         type: m.type ?? 'message',
+        subtype: m.subtype,
         channel: channelId,
         user: m.user,
         text: m.text ?? '',
         ts: m.ts ?? '',
         thread_ts: m.thread_ts,
         bot_id: m.bot_id,
+        files: m.files,
       }))
-      .reverse(); // Slack returnează newest-first; noi vrem oldest-first
+      .reverse(); // Slack returneaza newest-first; noi vrem oldest-first
   }
 
   onMessage(handler: SlackMessageHandler): void {

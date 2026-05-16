@@ -142,3 +142,39 @@ describe('SlackPoller', () => {
     });
   });
 });
+
+describe('fetchHistory with files', () => {
+  it('keeps a message that has files but no text', async () => {
+    const historyMock = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          type: 'message',
+          subtype: 'file_share',
+          user: 'U123',
+          text: '',
+          ts: '1700000000.000100',
+          files: [
+            {
+              id: 'F1',
+              name: 'cat.jpg',
+              mimetype: 'image/jpeg',
+              filetype: 'jpg',
+              url_private_download: 'https://files.slack.com/cat.jpg',
+              size: 1234,
+            },
+          ],
+        },
+      ],
+    });
+    const poller = new SlackPoller('xapp-test', 'xoxb-test');
+    (poller as unknown as { webClient: { conversations: { history: unknown } } })
+      .webClient.conversations.history = historyMock;
+
+    const events = await poller.fetchHistory('C0123456', 1699999999);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].files).toHaveLength(1);
+    expect(events[0].files?.[0].mimetype).toBe('image/jpeg');
+    expect(events[0].text).toBe('');
+  });
+});
