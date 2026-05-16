@@ -176,5 +176,6 @@ describe('fetchHistory with files', () => {
     expect(events[0].files).toHaveLength(1);
     expect(events[0].files?.[0].mimetype).toBe('image/jpeg');
     expect(events[0].text).toBe('');
+    expect(events[0].subtype).toBe('file_share');
   });
 });

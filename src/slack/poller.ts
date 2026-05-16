@@ -53,6 +53,7 @@ export class SlackPoller {
       files?: SlackFile[];
     };
     const messages = (result.messages ?? []) as RawMsg[];
+    // text may be '' for file-only messages; the files branch handles that case
     return messages
       .filter(m => m.user && !m.bot_id && m.ts && (m.text || (m.files && m.files.length > 0)))
       .map(m => ({
