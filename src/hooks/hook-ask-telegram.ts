@@ -15,6 +15,7 @@ import {
   buildAskMultiSelectKeyboard,
   formatQuestionMessage,
 } from './index';
+import { isTelegramDisabled } from '../utils/env';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
@@ -24,6 +25,10 @@ async function main(): Promise<void> {
 
   const questions = tool_input.questions || [];
   if (questions.length === 0) {
+    process.exit(0);
+  }
+
+  if (isTelegramDisabled()) {
     process.exit(0);
   }
 
