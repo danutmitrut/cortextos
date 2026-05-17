@@ -16,7 +16,7 @@ vi.mock('@slack/web-api', () => {
   return { WebClient };
 });
 
-import { readMaxCrashesPerDay, notifyAgents, sendSlackCrashAlert } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, sendSlackCrashAlert, telegramSendEnabled } from '../../../src/hooks/hook-crash-alert';
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;
@@ -169,5 +169,29 @@ describe('sendSlackCrashAlert', () => {
   it('propagates errors from chat.postMessage', async () => {
     postMessageMock.mockRejectedValueOnce(new Error('slack error'));
     await expect(sendSlackCrashAlert('xoxb-token', 'C123', 'test message')).rejects.toThrow('slack error');
+  });
+});
+
+describe('telegramSendEnabled (crash-alert decoupling regression)', () => {
+  const original = process.env.CTX_TELEGRAM_DISABLED;
+  afterEach(() => {
+    if (original === undefined) delete process.env.CTX_TELEGRAM_DISABLED;
+    else process.env.CTX_TELEGRAM_DISABLED = original;
+  });
+
+  it('false when flag set, even with valid creds (so Slack still runs)', () => {
+    process.env.CTX_TELEGRAM_DISABLED = '1';
+    expect(telegramSendEnabled('bot', 'chat')).toBe(false);
+  });
+
+  it('false when creds missing (no early-return that would skip Slack)', () => {
+    delete process.env.CTX_TELEGRAM_DISABLED;
+    expect(telegramSendEnabled('', 'chat')).toBe(false);
+    expect(telegramSendEnabled('bot', undefined)).toBe(false);
+  });
+
+  it('true only when flag unset and both creds present', () => {
+    delete process.env.CTX_TELEGRAM_DISABLED;
+    expect(telegramSendEnabled('bot', 'chat')).toBe(true);
   });
 });
