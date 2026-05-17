@@ -239,7 +239,7 @@ export class AgentManager {
       }
 
       if (botToken && chatId && isTelegramDisabled()) {
-        log('Telegram disabled via CTX_TELEGRAM_DISABLED — skipping Telegram API, poller, commands, and handle for this agent');
+        log('Telegram disabled via CTX_TELEGRAM_DISABLED, skipping Telegram API, poller, commands, and handle for this agent');
       } else if (botToken && chatId) {
         telegramApi = new TelegramAPI(botToken);
         // Don't log sensitive user IDs — just indicate the gate is enabled
