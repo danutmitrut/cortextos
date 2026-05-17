@@ -78,6 +78,17 @@ describe('send-telegram Slack shim (CTX_TELEGRAM_DISABLED)', () => {
     expect(tgPhoto).not.toHaveBeenCalled();
   });
 
+  it('routes --file to Slack uploadFile, never to Telegram', async () => {
+    const doc = join(tempCwd, 'report.pdf');
+    writeFileSync(doc, Buffer.from([1, 2, 3]));
+    await busCommand.parseAsync(['send-telegram', '12345', 'caption', '--file', doc], { from: 'user' });
+    expect(slackUpload).toHaveBeenCalledTimes(1);
+    expect(slackUpload.mock.calls[0][0]).toBe('C999');
+    expect(slackUpload.mock.calls[0][1]).toBe(doc);
+    expect(slackUpload.mock.calls[0][2]).toBe('caption');
+    expect(tgDoc).not.toHaveBeenCalled();
+  });
+
   it('still normalizes literal \\n before Slack send', async () => {
     await busCommand.parseAsync(['send-telegram', '12345', 'a\\nb'], { from: 'user' });
     expect(slackSend.mock.calls[0][1]).toBe('a\nb');
