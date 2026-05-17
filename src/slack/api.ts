@@ -38,6 +38,8 @@ export class SlackAPI {
       filename: basename(filePath),
       initial_comment: caption && caption.length > 0 ? caption : undefined,
     });
+    // files.uploadV2 returns { ok: true } on success and throws on failure;
+    // this guard is a defensive net against hypothetical future SDK changes.
     if (!(result as { ok?: boolean }).ok) {
       throw new Error('Slack API error: file upload failed');
     }

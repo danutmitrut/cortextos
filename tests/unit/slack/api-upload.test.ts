@@ -51,4 +51,10 @@ describe('SlackAPI.uploadFile', () => {
     const api = new SlackAPI('xoxb-token');
     await expect(api.uploadFile('C1', f)).rejects.toThrow('file upload failed');
   });
+
+  it('propagates a filesystem error when the file does not exist', async () => {
+    const api = new SlackAPI('xoxb-token');
+    await expect(api.uploadFile('C1', join(tmp, 'does-not-exist.png'), 'cap')).rejects.toThrow();
+    expect(uploadV2Mock).not.toHaveBeenCalled();
+  });
 });
