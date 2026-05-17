@@ -10,7 +10,7 @@ import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, isTelegramDisabled } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
@@ -238,7 +238,9 @@ export class AgentManager {
         botToken = undefined;
       }
 
-      if (botToken && chatId) {
+      if (botToken && chatId && isTelegramDisabled()) {
+        log('Telegram disabled via CTX_TELEGRAM_DISABLED, skipping Telegram API, poller, commands, and handle for this agent');
+      } else if (botToken && chatId) {
         telegramApi = new TelegramAPI(botToken);
         // Don't log sensitive user IDs — just indicate the gate is enabled
         log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_user: enabled)`);

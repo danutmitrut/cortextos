@@ -20,7 +20,7 @@ import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, syncOAuthFromKeychain, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, isTelegramDisabled } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -959,6 +959,49 @@ busCommand
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
     message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+
+    // CTX_TELEGRAM_DISABLED: redirect to Slack instead of Telegram. Resolves
+    // the agent's Slack creds the same way send-slack/send-user do. Text uses
+    // SlackAPI.sendMessage; --image/--file uses SlackAPI.uploadFile.
+    if (isTelegramDisabled()) {
+      const shimEnv = resolveEnv();
+      let slackBotToken = '';
+      let slackChannelId = '';
+      if (shimEnv.agentDir) {
+        const agentEnvPath = join(shimEnv.agentDir, '.env');
+        if (existsSync(agentEnvPath)) {
+          const content = readFileSync(agentEnvPath, 'utf-8');
+          const pick = (key: string) => content.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim() ?? '';
+          slackBotToken = pick('SLACK_BOT_TOKEN');
+          slackChannelId = pick('SLACK_CHANNEL_ID');
+        }
+      }
+      if (!slackBotToken) slackBotToken = process.env.SLACK_BOT_TOKEN ?? '';
+      if (!slackChannelId) slackChannelId = process.env.SLACK_CHANNEL_ID ?? '';
+
+      if (!slackBotToken || !slackChannelId) {
+        console.error('Error: CTX_TELEGRAM_DISABLED is set but SLACK_BOT_TOKEN/SLACK_CHANNEL_ID are not configured for this agent. Cannot redirect send-telegram to Slack.');
+        process.exit(1);
+      }
+
+      const shimSlack = new SlackAPIClass(slackBotToken);
+      try {
+        if (opts.image || opts.file) {
+          await shimSlack.uploadFile(slackChannelId, (opts.image || opts.file) as string, message);
+        } else {
+          const ts = await shimSlack.sendMessage(slackChannelId, message);
+          if (shimEnv.agentName && shimEnv.ctxRoot) {
+            logOutboundSlack(shimEnv.ctxRoot, shimEnv.agentName, slackChannelId, message, ts);
+          }
+        }
+        console.log('Message sent');
+      } catch (err: any) {
+        console.error(`Failed to send: ${err.message || err}`);
+        process.exit(1);
+      }
+      return;
+    }
+
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';

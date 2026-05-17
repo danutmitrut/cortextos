@@ -176,3 +176,14 @@ export function sourceEnvFile(filePath: string): void {
     }
   }
 }
+
+/**
+ * Whether the Telegram integration is globally disabled via CTX_TELEGRAM_DISABLED.
+ * Active for "1" or "true" (case-insensitive, surrounding spaces tolerated);
+ * inactive when unset, empty, "0", or "false". Single source of truth shared by
+ * the daemon, the interactive hooks, and the bus CLI so all three agree.
+ */
+export function isTelegramDisabled(): boolean {
+  const v = (process.env.CTX_TELEGRAM_DISABLED || '').trim().toLowerCase();
+  return v === '1' || v === 'true';
+}

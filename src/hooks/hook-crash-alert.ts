@@ -19,6 +19,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
 import { WebClient } from '@slack/web-api';
+import { isTelegramDisabled } from '../utils/env';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -154,6 +155,16 @@ export async function sendSlackCrashAlert(slackBotToken: string, slackChannelId:
   await client.chat.postMessage({ channel: slackChannelId, text: message });
 }
 
+/**
+ * Telegram crash-alert send is enabled only when the flag is off AND both
+ * creds are present. Extracted so the decoupling is unit-testable: when this
+ * is false the Telegram fetch is skipped but the Slack block still runs
+ * (the old `if (!botToken || !chatId) return;` used to skip Slack too).
+ */
+export function telegramSendEnabled(botToken: string | undefined, chatId: string | undefined): boolean {
+  return !isTelegramDisabled() && !!botToken && !!chatId;
+}
+
 async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
@@ -259,7 +270,6 @@ async function main(): Promise<void> {
 
   const botToken = process.env.BOT_TOKEN;
   const chatId = process.env.CHAT_ID;
-  if (!botToken || !chatId) return;
 
   let message = '';
   switch (endType) {
@@ -306,7 +316,7 @@ async function main(): Promise<void> {
       break;
   }
 
-  if (message) {
+  if (message && telegramSendEnabled(botToken, chatId)) {
     try {
       const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
       await fetch(url, {
