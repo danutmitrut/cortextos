@@ -31,7 +31,7 @@
       "name": "nightly-metrics",
       "type": "recurring",
       "interval": "24h",
-      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via Telegram to the orchestrator."
+      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via cortextos bus send-user to the orchestrator."
     },
     {
       "name": "auto-commit",
