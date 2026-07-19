@@ -72,7 +72,15 @@ export function updateHeartbeat(
   ensureDir(paths.stateDir);
 
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const mode = options?.timezone ? detectDayNightMode(options.timezone) : detectDayNightMode('UTC');
+  // Callers rarely pass an explicit timezone — the HEARTBEAT.md templates and
+  // the fast-checker idle watchdog both invoke `bus update-heartbeat` without
+  // --timezone. Fall back to the timezone the daemon already injects into every
+  // agent's environment (agent-pty sets CTX_TIMEZONE and TZ from config.json;
+  // bash bus/_ctx-env.sh resolves the same chain), otherwise day/night mode
+  // silently degrades to UTC and agents west of UTC report mode=night from
+  // late afternoon local time.
+  const tz = options?.timezone || process.env.CTX_TIMEZONE || process.env.TZ || 'UTC';
+  const mode = detectDayNightMode(tz);
 
   const heartbeat: Heartbeat = {
     agent: agentName,
