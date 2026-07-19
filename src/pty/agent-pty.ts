@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
-import { injectMessage as injectMessageIntoPty } from './inject.js';
+import { injectMessage as injectMessageIntoPty, injectMessageAndConfirm as injectMessageAndConfirmIntoPty } from './inject.js';
 
 // node-pty types
 interface IPty {
@@ -310,6 +310,20 @@ export class AgentPTY {
    */
   injectMessage(content: string): void {
     injectMessageIntoPty((data) => this.write(data), content);
+  }
+
+  /**
+   * Inject a message and hold Enter until the output buffer shows evidence
+   * the paste was processed (bounded by a timeout) — see
+   * injectMessageAndConfirm in inject.ts for the mechanism and rationale.
+   * Callers must serialize invocations per PTY; overlapping paste→Enter
+   * windows are exactly the race this method exists to close.
+   */
+  async injectMessageAndConfirm(content: string): Promise<void> {
+    await injectMessageAndConfirmIntoPty((data) => this.write(data), content, {
+      readRecent: () => this.outputBuffer.getRecent(),
+      log: (msg) => console.log(`[agent-pty] ${msg}`),
+    });
   }
 
   /**
