@@ -51,6 +51,9 @@ export class FastChecker {
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
+  // Throttle for the requeue log line (an agent that stays down would
+  // otherwise emit it every poll cycle).
+  private requeueLogAt: number = 0;
 
   // Persistent dedup: message hashes to prevent duplicate delivery
   private seenHashes: Set<string> = new Set();
@@ -187,10 +190,17 @@ export class FastChecker {
     let messageBlock = '';
     const ackIds: string[] = [];
 
-    // Process queued Telegram messages
+    // Process queued Telegram messages. Keep the drained batch so a failed
+    // injection can put it back: Telegram messages exist ONLY in this
+    // in-memory queue (unlike inbox messages, which stay on disk until
+    // ACKed), so dropping the batch on failure loses them permanently —
+    // observed on Windows as a received-and-archived message that was never
+    // injected (the delivery-side sibling of #510's silent cron drops).
     let hasTelegramMessage = false;
+    const drainedTelegram: Array<{ formatted: string; ackIds: string[] }> = [];
     while (this.telegramMessages.length > 0) {
       const msg = this.telegramMessages.shift()!;
+      drainedTelegram.push(msg);
       messageBlock += msg.formatted;
       hasTelegramMessage = true;
     }
@@ -204,8 +214,10 @@ export class FastChecker {
 
     // Inject if there's anything
     if (messageBlock) {
-      const injected = this.agent.injectMessage(messageBlock);
-      if (injected) {
+      const result = this.agent.injectMessageDetailed
+        ? this.agent.injectMessageDetailed(messageBlock)
+        : ({ ok: this.agent.injectMessage(messageBlock) } as { ok: boolean; code?: string });
+      if (result.ok) {
         // ACK inbox messages
         for (const id of ackIds) {
           ackInbox(this.paths, id);
@@ -219,6 +231,17 @@ export class FastChecker {
         }
         // Cooldown after injection
         await sleep(5000);
+      } else if (hasTelegramMessage && (!('code' in result) || result.code === 'NOT_RUNNING')) {
+        // Delivery failed while the agent was down/restarting: requeue the
+        // Telegram batch for the next cycle instead of losing it. Inbox
+        // messages need nothing — un-ACKed, checkInbox re-reads them from
+        // disk next cycle. DEDUPED is deliberately NOT requeued: the same
+        // block would re-hash identical every cycle and spin forever.
+        this.telegramMessages.unshift(...drainedTelegram);
+        if (Date.now() - this.requeueLogAt > 60_000) {
+          this.requeueLogAt = Date.now();
+          this.log(`Inject failed (${'code' in result ? result.code : 'not delivered'}) — requeued ${drainedTelegram.length} Telegram message(s)`);
+        }
       }
     }
 

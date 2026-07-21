@@ -1022,3 +1022,89 @@ describe('FastChecker', () => {
     });
   });
 });
+
+describe('pollCycle — Telegram requeue on failed delivery', () => {
+  // Field evidence (Windows/ConPTY diagnostic, 2026-07-20): a Telegram
+  // message was received and archived by the daemon but never injected —
+  // the drained in-memory batch was dropped when injection failed. Unlike
+  // inbox messages (on disk until ACKed), Telegram messages have no other
+  // copy, so a failed delivery must put the batch back.
+  let testDir: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-fastchecker-requeue-'));
+    paths = createTestPaths(testDir);
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.useRealTimers();
+  });
+
+  function createDetailedMockAgent() {
+    return {
+      name: 'test-agent',
+      isBootstrapped: vi.fn().mockReturnValue(true),
+      injectMessage: vi.fn().mockReturnValue(true),
+      injectMessageDetailed: vi.fn(),
+      write: vi.fn(),
+    } as any;
+  }
+
+  it('requeues the batch on NOT_RUNNING and redelivers it next cycle', async () => {
+    const agent = createDetailedMockAgent();
+    agent.injectMessageDetailed.mockReturnValue({ ok: false, code: 'NOT_RUNNING', message: 'down' });
+    const checker = new FastChecker(agent, paths, '/tmp/framework');
+
+    checker.queueTelegramMessage('MSG-A\n');
+    await (checker as any).pollCycle();
+
+    expect(agent.injectMessageDetailed).toHaveBeenCalledTimes(1);
+    expect(agent.injectMessageDetailed.mock.calls[0][0]).toContain('MSG-A');
+    // Batch is back in the queue, not lost.
+    expect((checker as any).telegramMessages).toHaveLength(1);
+
+    // Agent comes back: next cycle delivers the SAME message.
+    agent.injectMessageDetailed.mockReturnValue({ ok: true });
+    vi.useFakeTimers();
+    const cycle = (checker as any).pollCycle();
+    await vi.advanceTimersByTimeAsync(5000); // post-inject cooldown
+    await cycle;
+
+    expect(agent.injectMessageDetailed).toHaveBeenCalledTimes(2);
+    expect(agent.injectMessageDetailed.mock.calls[1][0]).toContain('MSG-A');
+    expect((checker as any).telegramMessages).toHaveLength(0);
+  });
+
+  it('does not requeue a DEDUPED batch (would spin forever on an identical hash)', async () => {
+    const agent = createDetailedMockAgent();
+    agent.injectMessageDetailed.mockReturnValue({ ok: false, code: 'DEDUPED', message: 'dup' });
+    const checker = new FastChecker(agent, paths, '/tmp/framework');
+
+    checker.queueTelegramMessage('MSG-B\n');
+    await (checker as any).pollCycle();
+
+    expect(agent.injectMessageDetailed).toHaveBeenCalledTimes(1);
+    expect((checker as any).telegramMessages).toHaveLength(0);
+  });
+
+  it('keeps legacy boolean injectMessage working (mock agents without injectMessageDetailed)', async () => {
+    const agent = {
+      name: 'legacy-agent',
+      isBootstrapped: vi.fn().mockReturnValue(true),
+      injectMessage: vi.fn().mockReturnValue(true),
+      write: vi.fn(),
+    } as any;
+    const checker = new FastChecker(agent, paths, '/tmp/framework');
+
+    checker.queueTelegramMessage('MSG-C\n');
+    vi.useFakeTimers();
+    const cycle = (checker as any).pollCycle();
+    await vi.advanceTimersByTimeAsync(5000);
+    await cycle;
+
+    expect(agent.injectMessage).toHaveBeenCalledTimes(1);
+    expect((checker as any).telegramMessages).toHaveLength(0);
+  });
+});
