@@ -1,8 +1,11 @@
 import { Command } from 'commander';
+import { execSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ensureDir } from '../utils/atomic.js';
+import { validateOrgName } from '../utils/validate.js';
+import { stripBom } from '../utils/strip-bom.js';
 import type { OrgContext } from '../types/index.js';
 
 export const initCommand = new Command('init')
@@ -10,6 +13,21 @@ export const initCommand = new Command('init')
   .option('--instance <id>', 'Instance ID', 'default')
   .description('Create a new cortextOS organization')
   .action(async (orgName: string, options: { instance: string }) => {
+    // Validate the org name BEFORE creating anything on disk.
+    // Without this, mixed-case names like 'teamStupid' pass through `init`,
+    // get written to disk, and then fail every dashboard add-agent and every
+    // `cortextos bus *` invocation at runtime because `src/utils/env.ts` and
+    // the dashboard API both call `validateOrgName()` strictly. Mirrors the
+    // BUG-041 fix for `validateAgentName()` in src/cli/add-agent.ts.
+    try {
+      validateOrgName(orgName);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      console.error(`Org names must match /^[a-z0-9_-]+$/ (lowercase letters, numbers, underscores, hyphens).`);
+      console.error(`Examples of valid names: acme, myco, demo, team-1, team_alpha`);
+      process.exit(1);
+    }
+
     const instanceId = options.instance;
     const ctxRoot = join(homedir(), '.cortextos', instanceId);
     const projectRoot = process.cwd();
@@ -72,7 +90,10 @@ export const initCommand = new Command('init')
     } else {
       // Fill in any missing fields (handles upgrades from older context.json without new fields)
       try {
-        const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
+        // stripBom: see src/utils/strip-bom.ts. Skipping this would make
+        // every re-run of `cortextos init` silently fall through to the
+        // catch block, leaving context.json un-upgraded.
+        const ctx = JSON.parse(stripBom(readFileSync(contextPath, 'utf-8')));
         if (!ctx.timezone) ctx.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         if (!ctx.name) ctx.name = orgName;
         if (!ctx.day_mode_start) ctx.day_mode_start = '08:00';
@@ -135,7 +156,8 @@ export const initCommand = new Command('init')
       let ctx: OrgContext | null = null;
       try {
         const contextPath = join(orgDir, 'context.json');
-        ctx = JSON.parse(readFileSync(contextPath, 'utf-8')) as OrgContext;
+        // stripBom: same incident as line ~75 above
+        ctx = JSON.parse(stripBom(readFileSync(contextPath, 'utf-8'))) as OrgContext;
       } catch { /* skip if unreadable */ }
 
       if (ctx) {
@@ -178,6 +200,7 @@ export const initCommand = new Command('init')
               '',
               '- Agent-to-agent: `cortextos bus send-message <agent> <priority> "<text>"`',
               '- Telegram to user: `cortextos bus send-telegram <chat_id> "<text>"`',
+              '- React to a Telegram message (single emoji ack, no verbal noise): `cortextos bus react-telegram <chat_id> <message_id> 👍`',
               '- Check inbox: `cortextos bus check-inbox`',
               '',
             ].join('\n');
@@ -188,6 +211,21 @@ export const initCommand = new Command('init')
         if (regenerated > 0) {
           console.log(`  Regenerated SYSTEM.md for ${regenerated} agent(s)`);
         }
+      }
+    }
+
+    // Best-effort: install the tracked git pre-push hook (build + test gate) so
+    // this clone gets the gate without a manual step. Non-fatal — only runs when
+    // the project is a git repo AND ships the installer; setup-hooks.sh is
+    // non-clobbering, so this is safe to run on every init.
+    if (process.platform !== 'win32' &&
+        existsSync(join(projectRoot, '.git')) &&
+        existsSync(join(projectRoot, 'scripts', 'setup-hooks.sh'))) {
+      try {
+        execSync('bash scripts/setup-hooks.sh', { cwd: projectRoot, stdio: 'ignore' });
+        console.log('  Installed git pre-push hook (build + test gate)');
+      } catch {
+        console.log('  Skipped git pre-push hook install (run: bash scripts/setup-hooks.sh)');
       }
     }
 

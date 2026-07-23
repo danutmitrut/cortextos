@@ -3,7 +3,7 @@ import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
-import { validateAgentName } from '../utils/validate.js';
+import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
@@ -18,14 +18,12 @@ import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-stat
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
-import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, syncOAuthFromKeychain, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, resolveTargetAgentDir } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
-import { SlackAPI as SlackAPIClass } from '../slack/api.js';
-import { logOutboundSlack } from '../slack/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -33,6 +31,9 @@ import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, Approval
  * Returns an error message if the transition should be blocked, or null if allowed.
  */
 function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org: string, taskDir: string): string | null {
+  // Reject a traversal task id before it builds the task-file path below — this
+  // runs ahead of updateTask/completeTask, so it can't rely on findTaskFile's guard.
+  validateTaskId(taskId);
   // Read org context to check require_deliverables setting
   const contextPath = join(frameworkRoot, 'orgs', org, 'context.json');
   if (!existsSync(contextPath)) return null;
@@ -812,7 +813,24 @@ busCommand
   .option('--cycle <name>', 'Cycle name')
   .action((action: string, agent: string, opts: { metric?: string; metricType?: string; surface?: string; direction?: string; window?: string; measurement?: string; loopInterval?: string; enabled?: string; cycle?: string }) => {
     const env = resolveEnv();
-    const agentDir = env.agentDir || process.cwd();
+    // Cycles live in the TARGET agent's experiments/config.json — the file
+    // the autoresearch skill reads in that agent's session. Writing to the
+    // caller's dir instead silently created a second registry the target
+    // never reads.
+    let agentDir: string | null = null;
+    try {
+      agentDir = resolveTargetAgentDir(env, agent);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    if (!agentDir && agent === env.agentName) {
+      agentDir = env.agentDir || process.cwd();
+    }
+    if (!agentDir) {
+      console.error(`Cannot resolve agent directory for '${agent}'. Cycles are stored in the target agent's experiments/config.json — check the agent name.`);
+      process.exit(1);
+    }
     if (opts.direction && opts.direction !== 'higher' && opts.direction !== 'lower') {
       console.error(`Invalid --direction '${opts.direction}'. Must be 'higher' or 'lower'`);
       process.exit(1);
@@ -1025,131 +1043,49 @@ busCommand
   });
 
 busCommand
-  .command('send-user')
-  .description('Send a message to the operator via all configured channels (Telegram and/or Slack)')
-  .argument('<message>', 'Message text')
-  .action(async (message: string) => {
-    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    const env = resolveEnv();
+  .command('react-telegram')
+  .description("Set the bot's reaction on a Telegram message (single emoji ack)")
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<message-id>', 'ID of the message to react to')
+  .argument('[emoji]', 'Reaction emoji (default: 👍). Pass an empty string to clear.', '👍')
+  .action(async (chatId: string, messageIdRaw: string, emoji: string) => {
+    const messageId = Number(messageIdRaw);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      console.error(`Invalid message-id '${messageIdRaw}'. Must be a positive integer.`);
+      process.exit(1);
+    }
 
-    // Read agent .env for all channel credentials
+    // Resolve bot token: agent .env first, then process.env (same flow as
+    // send-telegram so the agent identity / personality of the reaction
+    // matches the agent that owns the conversation).
+    const env = resolveEnv();
     let botToken = '';
-    let chatId = '';
-    let slackBotToken = '';
-    let slackChannelId = '';
-
     if (env.agentDir) {
-      const agentEnvPath = join(env.agentDir, '.env');
-      if (existsSync(agentEnvPath)) {
-        const content = readFileSync(agentEnvPath, 'utf-8');
-        const match = (key: string) => content.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim() ?? '';
-        botToken = match('BOT_TOKEN');
-        chatId = match('CHAT_ID');
-        slackBotToken = match('SLACK_BOT_TOKEN');
-        slackChannelId = match('SLACK_CHANNEL_ID');
+      const { readFileSync, existsSync } = require('fs');
+      const { join } = require('path');
+      const agentEnv = join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const content = readFileSync(agentEnv, 'utf-8');
+        const match = content.match(/^BOT_TOKEN=(.+)$/m);
+        if (match && match[1].trim()) botToken = match[1].trim();
       }
     }
-
-    // Fall back to process env
-    if (!botToken) botToken = process.env.BOT_TOKEN ?? '';
-    if (!chatId) chatId = process.env.CHAT_ID ?? '';
-    if (!slackBotToken) slackBotToken = process.env.SLACK_BOT_TOKEN ?? '';
-    if (!slackChannelId) slackChannelId = process.env.SLACK_CHANNEL_ID ?? '';
-
-    const hasTelegram = !!(botToken && chatId);
-    const hasSlack = !!(slackBotToken && slackChannelId);
-
-    if (!hasTelegram && !hasSlack) {
-      console.error(`Error: No messaging channels configured for agent "${env.agentName ?? 'unknown'}". Set BOT_TOKEN+CHAT_ID (Telegram) or SLACK_BOT_TOKEN+SLACK_CHANNEL_ID (Slack) in the agent .env file.`);
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+    if (!botToken) {
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
       process.exit(1);
     }
 
-    const results: Array<{ channel: string; error?: string }> = [];
-
-    if (hasTelegram) {
-      try {
-        const api = new TelegramAPI(botToken);
-        const result = await api.sendMessage(chatId, message, undefined, { parseMode: 'HTML' });
-        const sentMessageId = result?.result?.message_id ?? 0;
-        if (env.agentName && env.ctxRoot) {
-          logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, { parseMode: 'html' });
-          cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
-          try {
-            const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-            const preview = message.length > 120 ? message.slice(0, 120) + '...' : message;
-            logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
-          } catch { /* non-fatal */ }
-        }
-        results.push({ channel: 'telegram' });
-      } catch (err: any) {
-        results.push({ channel: 'telegram', error: err.message || String(err) });
-      }
-    }
-
-    if (hasSlack) {
-      try {
-        const slackApi = new SlackAPIClass(slackBotToken);
-        const ts = await slackApi.sendMessage(slackChannelId, message);
-        if (env.agentName && env.ctxRoot) {
-          logOutboundSlack(env.ctxRoot, env.agentName, slackChannelId, message, ts);
-        }
-        results.push({ channel: 'slack' });
-      } catch (err: any) {
-        results.push({ channel: 'slack', error: err.message || String(err) });
-      }
-    }
-
-    const succeeded = results.filter(r => !r.error);
-    const failed = results.filter(r => r.error);
-
-    if (succeeded.length > 0) {
-      console.log(`Message sent via: ${succeeded.map(r => r.channel).join(', ')}`);
-    }
-    if (failed.length > 0) {
-      for (const f of failed) {
-        console.error(`Failed to send via ${f.channel}: ${f.error}`);
-      }
-      // Exit 1 only if ALL channels failed
-      if (succeeded.length === 0) {
-        process.exit(1);
-      }
-    }
-  });
-
-busCommand
-  .command('send-slack')
-  .description('Send a message to a Slack channel')
-  .argument('<channel-id>', 'Slack channel ID (C...)')
-  .argument('<message>', 'Message text')
-  .action(async (channelId: string, message: string) => {
-    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    const env = resolveEnv();
-    let slackBotToken = '';
-
-    if (env.agentDir) {
-      const agentEnvPath = join(env.agentDir, '.env');
-      if (existsSync(agentEnvPath)) {
-        const content = readFileSync(agentEnvPath, 'utf-8');
-        const match = content.match(/^SLACK_BOT_TOKEN=(.+)$/m);
-        if (match?.[1]?.trim()) slackBotToken = match[1].trim();
-      }
-    }
-    if (!slackBotToken) slackBotToken = process.env.SLACK_BOT_TOKEN ?? '';
-
-    if (!slackBotToken) {
-      console.error('Error: SLACK_BOT_TOKEN not configured. Set it in your agent .env file to enable Slack.');
-      process.exit(1);
-    }
-
-    const slackApi = new SlackAPIClass(slackBotToken);
+    const api = new TelegramAPI(botToken);
     try {
-      const ts = await slackApi.sendMessage(channelId, message);
-      if (env.agentName && env.ctxRoot) {
-        logOutboundSlack(env.ctxRoot, env.agentName, channelId, message, ts);
-      }
-      console.log('Message sent');
+      // Empty string clears the reaction; otherwise send a single-emoji array.
+      // Telegram limits bots to one reaction per message; we treat that as the
+      // primitive here. Multi-emoji is a future feature if/when needed.
+      const emojis = emoji === '' ? [] : [emoji];
+      await api.setMessageReaction(chatId, messageId, emojis);
+      console.log(emojis.length > 0 ? `Reacted ${emoji}` : 'Reaction cleared');
     } catch (err: any) {
-      console.error(`Failed to send: ${err.message || err}`);
+      console.error(`Failed to react: ${err.message || err}`);
       process.exit(1);
     }
   });
@@ -2534,6 +2470,11 @@ busCommand
   .description('Stop hook: writes last_idle.flag timestamp so fast-checker knows agent finished its turn')
   .action(() => runHook('hook-idle-flag'));
 
+busCommand
+  .command('hook-loop-detector')
+  .description('PreToolUse hook: detects and blocks repeated tool loops (same-args repetition + ping-pong alternation)')
+  .action(() => runHook('hook-loop-detector'));
+
 // --- OAuth token rotation commands ---
 
 busCommand
@@ -2542,16 +2483,10 @@ busCommand
   .option('--account <name>', 'Check specific account (default: active account)')
   .option('--force', 'Bypass cache and fetch fresh data')
   .option('--json', 'Output as JSON')
-  .option('--warn-5h <pct>', 'Print Warning if 5h utilization >= this percent (default: 90)', '90')
-  .option('--warn-7day <pct>', 'Print CODE RED if 7-day utilization >= this percent (default: 80)', '80')
-  .option('--chat-id <id>', 'Accepted for compatibility (alerts are printed to stdout for cron handling)')
-  .action(async (opts: { account?: string; force?: boolean; json?: boolean; warn5h?: string; warn7day?: string; chatId?: string }) => {
+  .action(async (opts: { account?: string; force?: boolean; json?: boolean }) => {
     const env = resolveEnv();
     try {
       const result = await checkUsageApi(env.ctxRoot, { force: opts.force, account: opts.account });
-      const threshold5h = parseFloat(opts.warn5h ?? '90') / 100;
-      const threshold7day = parseFloat(opts.warn7day ?? '80') / 100;
-
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -2562,12 +2497,6 @@ busCommand
         console.log(`5h utilization:  ${pct(result.five_hour_utilization)}${warn5h}`);
         console.log(`7d utilization:  ${pct(result.seven_day_utilization)}${warn7d}`);
         console.log(`Fetched at: ${result.fetched_at}`);
-
-        if (result.seven_day_utilization >= threshold7day) {
-          console.log(`CODE RED: 7-day usage at ${pct(result.seven_day_utilization)}. Reduce agent activity or pause non-critical crons.`);
-        } else if (result.five_hour_utilization >= threshold5h) {
-          console.log(`Warning: 5h window at ${pct(result.five_hour_utilization)}.`);
-        }
       }
     } catch (err) {
       console.error(`Error: ${err}`);
@@ -2642,27 +2571,6 @@ busCommand
       const warn7d = acct.seven_day_utilization >= ALERT_7D ? ' ⚠️' : '';
       console.log(`${name}${active}`);
       console.log(`  5h: ${pct(acct.five_hour_utilization)}${warn5h}  7d: ${pct(acct.seven_day_utilization)}${warn7d}  expires: ${expiry}`);
-    }
-  });
-
-busCommand
-  .command('sync-oauth-from-keychain')
-  .description('Sync OAuth tokens from macOS Keychain into accounts.json (idempotent — safe to run on a cron)')
-  .action((opts: Record<string, unknown>) => {
-    const env = resolveEnv();
-    try {
-      const result = syncOAuthFromKeychain(env.ctxRoot);
-      if (result.updated) {
-        const expiresIn = result.expires_at
-          ? Math.round((result.expires_at - Date.now()) / 1000 / 60)
-          : 0;
-        console.log(`Token synced from Keychain. Expires in: ${expiresIn} minutes`);
-      } else {
-        console.log(`No update needed: ${result.reason}`);
-      }
-    } catch (err) {
-      console.error(`Error: ${err}`);
-      process.exit(1);
     }
   });
 

@@ -4,12 +4,9 @@
 # Run once after cloning:
 #   bash scripts/setup-hooks.sh
 #
-# Installs:
-#   - pre-commit: blocks commits that introduce *.env files or content
-#     matching well-known secret patterns (Telegram BOT_TOKEN, sk-ant-*,
-#     AIza*, ghp_*, AKIA*, etc.). See SECURITY.md for the full list.
-#   - pre-push: runs npm run build && npm test before any push. If either
-#     fails, the push is aborted and you fix it locally rather than on CI.
+# Installs a pre-push hook that runs npm run build && npm test before
+# any push. If either fails, the push is aborted and you fix it locally
+# rather than failing on CI.
 
 set -euo pipefail
 
@@ -30,12 +27,24 @@ install_hook() {
     return
   fi
 
+  # Non-clobbering: never overwrite an existing hook the user/operator installed
+  # (e.g. a local leak-guard pre-push). Only install when there is no hook, or
+  # when the existing hook is byte-identical to ours (already installed). The
+  # -L catches a broken symlink too, which -e alone would miss (and then clobber).
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    if cmp -s "$src" "$dest"; then
+      echo "  Already installed: .git/hooks/$name"
+    else
+      echo "  Skipped: .git/hooks/$name already exists (leaving your hook in place)"
+    fi
+    return
+  fi
+
   cp "$src" "$dest"
   chmod +x "$dest"
   echo "  Installed: .git/hooks/$name"
 }
 
 echo "Installing cortextOS git hooks..."
-install_hook pre-commit
 install_hook pre-push
 echo "Done. Hooks active for this repo clone."

@@ -3,9 +3,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFi
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { OrgContext } from '../types';
-import { validateAgentName } from '../utils/validate';
+import { validateAgentName, validateOrgName } from '../utils/validate';
 
-const VALID_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server'] as const;
+const VALID_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server', 'opencode'] as const;
 type RuntimeKind = typeof VALID_RUNTIMES[number];
 
 // Templates that don't have a codex variant yet. Pairing any of these with
@@ -74,6 +74,20 @@ export const addAgentCommand = new Command('add-agent')
       process.exit(1);
     }
 
+    // Mirror the BUG-041 fix above for the resolved org name.
+    // Mixed-case orgs pass through add-agent today (whether supplied via --org or
+    // auto-detected from the orgs/ directory), get committed to disk, and then
+    // break every `cortextos bus *` invocation at runtime because env.ts strictly
+    // validates CTX_ORG. The dashboard API also rejects them with HTTP 400.
+    // Canonical rule: src/utils/validate.ts:validateOrgName (/^[a-z0-9_-]+$/).
+    try {
+      validateOrgName(org);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      console.error(`Org names must match /^[a-z0-9_-]+$/ (lowercase letters, numbers, underscores, hyphens).`);
+      process.exit(1);
+    }
+
     const agentDir = join(projectRoot, 'orgs', org, 'agents', name);
     if (existsSync(agentDir)) {
       console.error(`Agent "${name}" already exists at ${agentDir}`);
@@ -92,16 +106,19 @@ export const addAgentCommand = new Command('add-agent')
     // For codex-app-server, skills live under plugins/cortextos-agent-skills/skills
     // and are copied in by the template; .claude/skills is Claude-Code-only.
     const isCodexAppServer = options.runtime === 'codex-app-server';
-    if (!isCodexAppServer) {
+    const isOpencode = options.runtime === 'opencode';
+    if (!isCodexAppServer && !isOpencode) {
       mkdirSync(join(agentDir, '.claude', 'skills'), { recursive: true });
     }
 
-    // Resolve template name. Codex agents created with the default --template agent
-    // get the codex-specific bootstrap in templates/agent-codex/. Any explicit
-    // --template choice is honored as-is so orchestrator/analyst/etc still work.
-    const effectiveTemplate = (isCodexAppServer && options.template === 'agent')
+    // Resolve template name. Runtime-specific default agents get runtime-native
+    // bootstraps; explicit template choices are honored so orchestrator/analyst
+    // etc still work behind their current compatibility gates.
+    const effectiveTemplate = isCodexAppServer && options.template === 'agent'
       ? 'agent-codex'
-      : options.template;
+      : isOpencode && options.template === 'agent'
+        ? 'agent-opencode'
+        : options.template;
 
     // Copy template files
     const templateDir = findTemplateDir(projectRoot, effectiveTemplate);
@@ -124,6 +141,20 @@ export const addAgentCommand = new Command('add-agent')
         }
       } catch (err) {
         console.error(`Warning: failed to install codex skill symlinks: ${(err as Error).message}`);
+      }
+    }
+
+    // OpenCode agents: expose the same local Cortext skill bundle through
+    // agent-local `.opencode/skills/<skill>` symlinks so OpenCode's native
+    // `skill` tool can discover them without relying on host-global state.
+    if (isOpencode) {
+      try {
+        const linksCreated = installOpencodeSkillSymlinks(agentDir);
+        if (linksCreated > 0) {
+          console.log(`  Linked ${linksCreated} skill(s) into .opencode/skills/`);
+        }
+      } catch (err) {
+        console.error(`Warning: failed to install opencode skill symlinks: ${(err as Error).message}`);
       }
     }
 
@@ -239,6 +270,7 @@ export const addAgentCommand = new Command('add-agent')
             '',
             '- Agent-to-agent: `cortextos bus send-message <agent> <priority> "<text>"`',
             '- Telegram to user: `cortextos bus send-telegram <chat_id> "<text>"`',
+            '- React to a Telegram message (single emoji ack, no verbal noise): `cortextos bus react-telegram <chat_id> <message_id> 👍`',
             '- Check inbox: `cortextos bus check-inbox`',
             '',
           ].join('\n');
@@ -363,6 +395,39 @@ function installCodexSkillSymlinks(agentDir: string, agentName: string): number 
   return linked;
 }
 
+function installOpencodeSkillSymlinks(agentDir: string): number {
+  const skillsRoot = join(agentDir, 'plugins', 'cortextos-agent-skills', 'skills');
+  if (!existsSync(skillsRoot)) return 0;
+
+  const opencodeSkillsDir = join(agentDir, '.opencode', 'skills');
+  mkdirSync(opencodeSkillsDir, { recursive: true });
+
+  let linked = 0;
+  const entries = readdirSync(skillsRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillSrc = join(skillsRoot, entry.name);
+    const linkPath = join(opencodeSkillsDir, entry.name);
+    try {
+      if (existsSync(linkPath) || lstatSync(linkPath, { throwIfNoEntry: false } as any)) {
+        try {
+          const st = lstatSync(linkPath);
+          if (st.isSymbolicLink()) {
+            unlinkSync(linkPath);
+          } else {
+            continue;
+          }
+        } catch { /* path likely doesn't exist; continue to symlink */ }
+      }
+      symlinkSync(skillSrc, linkPath, 'dir');
+      linked++;
+    } catch (err) {
+      console.error(`    Warning: failed to symlink ${linkPath}: ${(err as Error).message}`);
+    }
+  }
+  return linked;
+}
+
 function findTemplateDir(projectRoot: string, template: string): string | null {
   const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || projectRoot;
   const candidates = [
@@ -447,5 +512,6 @@ Complete tasks: \`cortextos bus complete-task <id> --result "<text>"\`
 Log events: \`cortextos bus log-event <category> <event> <severity>\`
 Update heartbeat: \`cortextos bus update-heartbeat "<status>"\`
 Send Telegram: \`cortextos bus send-telegram <chat_id> "<text>"\`
+React to Telegram message (single emoji ack): \`cortextos bus react-telegram <chat_id> <message_id> 👍\`
 `;
 }

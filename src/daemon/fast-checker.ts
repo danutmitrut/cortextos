@@ -9,9 +9,23 @@ import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
-import { stripControlChars } from '../utils/validate.js';
+import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
+import { agentHoldsContextHandoffLease, releaseContextHandoffLease, requestContextHandoffLease } from './context-handoff-lease.js';
 
 type LogFn = (msg: string) => void;
+
+/**
+ * Post-boot grace window (ms) during which soft context-handoff actions are
+ * suppressed. Runtime-aware: codex-app-server and opencode briefly report
+ * inflated prior prompt-cache context tokens, and that spurious spike can land
+ * ~6-8min after a fresh boot (observed double-handoffs ~6-8min apart on a codex
+ * agent), OUTSIDE a short grace. Those runtimes get a 10min window; all others
+ * keep the original 2min.
+ */
+export function handoffGraceMs(runtime: string | undefined): number {
+  if (runtime === 'codex-app-server' || runtime === 'opencode') return 600_000;
+  return 120_000;
+}
 
 /**
  * Fast message checker for a single agent.
@@ -54,7 +68,11 @@ export class FastChecker {
   private ctxHandoffFiredAt: number = 0;    // fires once per session (0 = not yet)
   private ctxHandoffDeadlineAt: number = 0; // timestamp after which force-restart fires
   private ctxLastSessionId: string | null = null; // detects new session → clears stale deadline
+  private ctxSessionStartedAt: number = 0; // when current session_id was first observed — handoff grace window anchor
+  private ctxHandoffLeaseId: string | null = null;
+  private ctxHandoffQueuedLogAt: number = 0;
   private ctxCircuitRestarts: number[] = []; // timestamps of recent context-triggered restarts
+  private ctxHandoffFires: number[] = [];    // timestamps of recent Tier-2 handoff fires (cooperative-restart loop backstop)
   private ctxCircuitBrokenAt: number | null = null; // when circuit tripped (null = healthy)
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
@@ -219,11 +237,16 @@ export class FastChecker {
    */
   private formatInboxMessage(msg: InboxMessage): string {
     const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
-    return `=== AGENT MESSAGE from ${msg.from}${replyNote} [msg_id: ${msg.id}] ===
-\`\`\`
-${msg.text}
-\`\`\`
-Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
+    // msg.text/from are externally influenced (a body can carry its own
+    // fence/header markers; --body-stdin/--body-file made arbitrary bodies easy
+    // to send). The body is wrapped with wrapFenceSafe — a dynamically-sized
+    // fence the body cannot close, with the body left byte-exact so pasted code
+    // blocks stay readable. The inline `from` is collapse-sanitized (it sits in
+    // the header line, not a fence).
+    const safeFrom = sanitizeForPtyInjection(msg.from);
+    return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
+${wrapFenceSafe(msg.text)}
+Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 
 `;
   }
@@ -241,29 +264,34 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     lastSentText?: string,
     recentHistory?: string,
   ): string {
-    let replyCx = '';
-    if (replyToText) {
-      replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
-    }
+    // Every externally-influenced field below is untrusted (the sender controls
+    // text/display-name; reply-context, last-sent and recent-history are built
+    // from prior external messages). Sanitize each so none can escape the fence
+    // or forge a containment header. Unfenced context fields (reply/history) are
+    // the weakest surface — they sit raw in [Replying to: "..."] / [Recent ...].
+    const replyCx = FastChecker.formatReplyContext(replyToText);
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+      lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, 500))}"]\n`;
     }
 
     let historyCx = '';
     if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+      historyCx = `[Recent conversation:]\n${sanitizeForPtyInjection(recentHistory)}\n`;
     }
 
     // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
     // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
     // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
-    const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
+    // Non-slash bodies use wrapFenceSafe: an unescapable dynamically-sized fence
+    // that leaves the body byte-exact (legit code blocks preserved). Slash commands
+    // get control-char strip + header-quote only (no fence — must stay invokable).
+    const isSlashCommand = /^\/[a-zA-Z]/.test(stripControlChars(text).trim());
     const body = isSlashCommand
-      ? text.trim()
-      : `\`\`\`\n${text}\n\`\`\``;
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+      ? sanitizeForPtyInjection(text).trim()
+      : wrapFenceSafe(text);
+    return `=== TELEGRAM from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -310,12 +338,11 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     chatId: string | number,
     caption: string,
     imagePath: string,
+    replyToText?: string,
   ): string {
-    return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
-caption:
-\`\`\`
-${caption}
-\`\`\`
+    return `=== TELEGRAM PHOTO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
+${FastChecker.formatReplyContext(replyToText)}caption:
+${wrapFenceSafe(caption)}
 local_file: ${imagePath}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -332,14 +359,13 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     caption: string,
     filePath: string,
     fileName: string,
+    replyToText?: string,
   ): string {
-    return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
-caption:
-\`\`\`
-${caption}
-\`\`\`
+    return `=== TELEGRAM DOCUMENT from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
+${FastChecker.formatReplyContext(replyToText)}caption:
+${wrapFenceSafe(caption)}
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
@@ -360,13 +386,14 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     filePath: string,
     duration: number | undefined,
     transcript?: string,
+    replyToText?: string,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
     const transcriptBlock = transcript && transcript.trim()
-      ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
+      ? `transcript:\n${wrapFenceSafe(transcript.trim())}\n`
       : '';
-    return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
-duration: ${dur}s
+    return `=== TELEGRAM VOICE from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
+${FastChecker.formatReplyContext(replyToText)}duration: ${dur}s
 local_file: ${filePath}
 ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -384,19 +411,24 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your repl
     filePath: string,
     fileName: string,
     duration: number | undefined,
+    replyToText?: string,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
-    return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
-caption:
-\`\`\`
-${caption}
-\`\`\`
+    return `=== TELEGRAM VIDEO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
+${FastChecker.formatReplyContext(replyToText)}caption:
+${wrapFenceSafe(caption)}
 duration: ${dur}s
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
+  }
+
+  private static formatReplyContext(replyToText?: string): string {
+    return replyToText
+      ? `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, 500))}"]\n`
+      : '';
   }
 
   /**
@@ -768,7 +800,28 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    this.log(`Unhandled callback data: ${data}`);
+    // Inject unhandled callbacks as a Telegram message so the agent can process custom button flows.
+    // senderName (Telegram first_name) and callback_data are untrusted: sanitize both against
+    // PTY-injection before interpolating, matching the text path (sanitizeForPtyInjection at the
+    // `=== TELEGRAM from [USER: ...]` header). This block predates #592; #592's hardening was never
+    // retrofitted here, leaving forged `=== AGENT MESSAGE`/fence-breakout headers un-neutralized.
+    if (chatId && this.agent) {
+      const senderName = sanitizeForPtyInjection(query.from?.first_name || 'User');
+      const safeData = sanitizeForPtyInjection(data);
+      const msg = [
+        `=== TELEGRAM from [USER: ${senderName}] (chat_id:${chatId}) ===`,
+        `callback_data: ${safeData}`,
+        `message_id: ${messageId}`,
+        `Reply using: cortextos bus send-telegram ${chatId} '<your reply>'`,
+      ].join('\n');
+      const injected = this.agent.injectMessage(msg);
+      if (injected && this.telegramApi) {
+        try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
+      }
+      this.log(`Injected unhandled callback to agent: ${data.slice(0, 60)}`);
+    } else {
+      this.log(`Unhandled callback data (no agent/chatId): ${data}`);
+    }
   }
 
   /**
@@ -858,9 +911,11 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.log(`Urgent signal detected: ${content}`);
         unlinkSync(urgentPath);
 
-        // Inject the urgent message
+        // Inject the urgent message — fence the body unescapably (#592 follow-up)
+        // so a signal payload carrying its own fence can't break out and forge
+        // daemon containment headers.
         if (content) {
-          const urgentMsg = `=== URGENT SIGNAL ===\n\`\`\`\n${content}\n\`\`\`\n\n`;
+          const urgentMsg = `=== URGENT SIGNAL ===\n${wrapFenceSafe(content)}\n\n`;
           this.agent.injectMessage(urgentMsg);
         }
       } catch (err) {
@@ -888,8 +943,12 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     } catch { /* keep stale values */ }
     const config = this.agent.getConfig();
     return {
-      warn: config.ctx_warning_threshold ?? 70,
-      handoff: config.ctx_handoff_threshold ?? 80,
+      // Context-handoff is ON by default for every runtime/agent: an unset
+      // threshold falls back to 30% warning / 60% handoff (a percentage of the
+      // ACTIVE model's context window, so it adapts to window size). An explicit
+      // ctx_handoff_threshold <= 0 is the deliberate opt-out (see checkContextStatus).
+      warn: config.ctx_warning_threshold ?? 30,
+      handoff: config.ctx_handoff_threshold ?? 60,
     };
   }
 
@@ -906,6 +965,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       if (now - this.ctxCircuitBrokenAt >= 30 * 60_000) {
         this.ctxCircuitBrokenAt = null;
         this.ctxCircuitRestarts = [];
+        this.ctxHandoffFires = [];
         this.saveCtxCircuit();
         this.log('Context circuit breaker reset after 30min pause');
       } else {
@@ -932,6 +992,17 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       // 5-min deadline timer would otherwise fire on the fresh low-context session.
       const incomingSessionId = typeof data.session_id === 'string' ? data.session_id : null;
       if (incomingSessionId && incomingSessionId !== this.ctxLastSessionId) {
+        // Release any context-handoff lease held by this agent on a fresh session.
+        // This MUST be unconditional — released by agent name, not gated on
+        // ctxLastSessionId or the in-memory ctxHandoffLeaseId. A handoff restart can
+        // reset this monitor's per-agent state (both fields back to null), so gating
+        // release on either leaks the lease until its 10-min TTL and starves the fleet
+        // handoff queue: completed handoffs never free their slot, and queued agents
+        // above threshold wait up to a full TTL for a slot. A fresh session never needs
+        // a lease acquired by a prior session of the same agent; release-by-name is a
+        // no-op when none is held and also clears any stale queue entry.
+        releaseContextHandoffLease(this.paths.ctxRoot, this.agent.name);
+        this.ctxHandoffLeaseId = null;
         if (this.ctxLastSessionId !== null) {
           this.ctxHandoffFiredAt = 0;
           this.ctxHandoffDeadlineAt = 0;
@@ -939,24 +1010,82 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
           this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
         }
         this.ctxLastSessionId = incomingSessionId;
+        // Anchor the handoff grace window. A freshly-started session begins at low
+        // context, so context-handoff actions are suppressed for HANDOFF_GRACE_MS to
+        // avoid acting on a transient/stale high reading (observed on fresh codex
+        // app-server threads that briefly report prior prompt-cache tokens) that
+        // would otherwise fire an immediate handoff → restart → fresh-session loop.
+        this.ctxSessionStartedAt = now;
       }
     } catch { return; }
 
-    // Check PTY output for hard API overflow errors (always act regardless of threshold config)
+    // Check PTY output for hard API overflow errors (always act regardless of threshold config).
+    // Guard: only treat the banner phrase as a *live* overflow when context usage actually
+    // corroborates it (exceeds 200k, or pct genuinely high). The same phrase appears as benign
+    // text in memory files, source, and chat that *document* this mechanism — without this guard
+    // a fresh boot re-reading those at low context force-restarts on every boot, producing a loop.
+    const ctxCorroboratesOverflow = exceeds200k || (pct !== null && pct >= 85);
     const recentOutput = this.agent.getOutputBuffer()?.getRecent(8000) ?? '';
-    if (/extra usage.*?1[Mm] context|conversation too long.*?compaction/i.test(recentOutput)) {
-      this.log('Context overflow error detected in PTY output — force restarting');
+    if (ctxCorroboratesOverflow && /extra usage.*?1[Mm] context|conversation too long.*?compaction/i.test(recentOutput)) {
+      this.log('Context overflow error detected in PTY output at high context — force restarting');
       this.forceContextRestart('API overflow error in PTY output');
       return;
     }
 
     const { warn, handoff } = this.getCtxThresholds();
 
-    // No threshold configured — observe-only mode (log but don't act)
-    if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
+    // Default-ON: an UNSET ctx_handoff_threshold uses the 60% default from
+    // getCtxThresholds (handoff on for every agent with no config). An explicit
+    // ctx_handoff_threshold <= 0 is the deliberate opt-out (observe-only: log,
+    // never act). This is the only disable path now that default is on.
+    const configuredHandoff = this.agent.getConfig().ctx_handoff_threshold;
+    if (configuredHandoff !== undefined && configuredHandoff <= 0) return;
 
     const effectivePct = pct ?? (exceeds200k ? 101 : null);
     if (effectivePct === null) return;
+
+    // Session-id-independent leaked-lease release (the Claude null-session_id edge).
+    // The new-session detection above only releases a leaked lease when the bridge
+    // reports a non-null session_id. hook-context-status writes `session_id ?? null`,
+    // so a fresh Claude session reports session_id:null, that block is skipped, and a
+    // lease leaked by the agent's prior session sits in `active` until its 10-min TTL —
+    // starving the fleet handoff queue on the majority (Claude) path. Release it by name
+    // here, gated on the precise safety condition rather than the session_id proxy:
+    //   (1) effectivePct < handoff — the agent is NOT mid-handoff, so it cannot
+    //       legitimately need a handoff lease this tick; and
+    //   (2) ctxHandoffLeaseId === null — this monitor did not itself acquire the live
+    //       lease. A lease acquired by the CURRENT session always sets ctxHandoffLeaseId
+    //       synchronously at the Tier 2 acquire below (and resets context_status to 0%,
+    //       so the very next tick is below-threshold-but-lease-held). The only way to
+    //       hold a lease with this field null is that a prior session acquired it and a
+    //       full respawn recreated this monitor with null state — i.e. the leaked lease.
+    //       This is exactly the guarantee the original non-null-session_id gate gave,
+    //       without the proxy. A read-only existence check runs first so idle ticks
+    //       never pay the lease-file write.
+    if (
+      effectivePct < handoff
+      && this.ctxHandoffLeaseId === null
+      && agentHoldsContextHandoffLease(this.paths.ctxRoot, this.agent.name, now)
+    ) {
+      releaseContextHandoffLease(this.paths.ctxRoot, this.agent.name);
+      this.log('Released leaked context-handoff lease by name (fresh below-threshold session)');
+    }
+
+    // Grace window after a fresh session start: suppress soft context actions
+    // (warning + handoff) while the session is younger than HANDOFF_GRACE_MS. A
+    // just-started session cannot legitimately be at genuine overflow, so a high
+    // reading inside this window is a transient/stale spike (e.g. a fresh codex
+    // app-server thread briefly reporting prior prompt-cache tokens). Without this,
+    // such a spike fired an immediate handoff → cooperative hard-restart → fresh
+    // session, repeating every ~1-2min. The window is runtime-aware: codex-app-server
+    // and opencode can emit that spurious spike ~6-8min after boot (observed
+    // double-handoffs ~6-8min apart on a codex agent), so they get a 10min grace
+    // while all other runtimes keep 2min — see handoffGraceMs(). Hard API-overflow
+    // detection above is NOT gated by grace, so a genuine overflow is still caught
+    // immediately.
+    const HANDOFF_GRACE_MS = handoffGraceMs(this.agent.getConfig().runtime);
+    const withinHandoffGrace =
+      this.ctxSessionStartedAt > 0 && now - this.ctxSessionStartedAt < HANDOFF_GRACE_MS;
 
     // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
     if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
@@ -967,7 +1096,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
-    if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
+    if (effectivePct >= warn && !withinHandoffGrace && now - this.ctxWarningFiredAt > 15 * 60_000) {
       this.ctxWarningFiredAt = now;
       const pctRound = Math.round(effectivePct);
       const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
@@ -976,8 +1105,52 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     // Tier 2: handoff (fires once per session lifecycle)
-    if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
+    if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0 && !withinHandoffGrace) {
+      const lease = requestContextHandoffLease({
+        ctxRoot: this.paths.ctxRoot,
+        agentName: this.agent.name,
+      });
+      if (lease.status === 'queued') {
+        if (now - this.ctxHandoffQueuedLogAt > 60_000) {
+          this.ctxHandoffQueuedLogAt = now;
+          this.log(
+            `Context handoff queued at ${Math.round(effectivePct)}% `
+            + `(position ${lease.position}, active ${lease.activeCount}, queued ${lease.queuedCount}, wait ~${Math.ceil(lease.waitMs / 1000)}s)`,
+          );
+        }
+        return;
+      }
+      this.ctxHandoffLeaseId = lease.leaseId;
       this.ctxHandoffFiredAt = now;
+
+      // Cooperative-restart loop backstop. A handoff normally fires ONCE per session and
+      // the fresh session drops well below threshold, so legitimate usage never re-fires
+      // soon. If a runtime fails to reset context on the handoff restart (e.g. a
+      // thread-persistence regression), the fresh session immediately re-crosses the
+      // threshold and re-fires every cycle — a self-sustaining treadmill the restart
+      // circuit breaker misses because these are COOPERATIVE handoff restarts, not Tier-3
+      // force-restarts. Count handoff fires in a persisted 15min window (survives the
+      // restart); if they reach the cap, trip the circuit breaker (30min pause) instead of
+      // handing off again, so any handoff loop self-limits regardless of cause. Cap 3 is
+      // above the benign 1-2 fires a single very-large turn can produce before settling.
+      this.ctxHandoffFires = this.ctxHandoffFires.filter(t => now - t < 15 * 60_000);
+      this.ctxHandoffFires.push(now);
+      this.saveCtxCircuit();
+      if (this.ctxHandoffFires.length >= 3) {
+        this.ctxCircuitBrokenAt = now;
+        this.saveCtxCircuit();
+        // Release the lease we just acquired — we are pausing, not handing off.
+        releaseContextHandoffLease(this.paths.ctxRoot, this.agent.name);
+        this.ctxHandoffLeaseId = null;
+        this.ctxHandoffFiredAt = 0;
+        const msg = `Context handoff loop detected for ${this.agent.name}: ${this.ctxHandoffFires.length} handoffs in 15min — a runtime may not be resetting context on restart. Auto-handoff paused 30min. Check logs/${this.agent.name}/restarts.log.`;
+        this.log(msg);
+        if (this.telegramApi && this.chatId) {
+          this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+        }
+        return;
+      }
+
       this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
       // Reset context_status.json so the new session doesn't re-trigger immediately
       const statusPath = join(this.paths.stateDir, 'context_status.json');
@@ -1046,6 +1219,19 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
     this.ctxWarningFiredAt = 0;
+
+    // Release this dying session's context-handoff lease on teardown. This restart is
+    // IN-PROCESS — sessionRefresh() below does stop()+start() on the same AgentProcess
+    // and does NOT recreate this FastChecker, so ctxHandoffLeaseId survives into the
+    // fresh session. The by-name cleanup in checkContextStatus is gated on
+    // ctxHandoffLeaseId === null, so without this it would skip a lease this session
+    // leaked when the fresh session reports session_id:null (the Tier-3 arm of the
+    // Claude null-session_id leak — the agent ignored the 5-min handoff prompt and was
+    // force-restarted). Release by name and clear the in-memory id HERE, before the
+    // restart spawns the new session, so we free the dying session's own lease — never
+    // a lease the fresh session might later acquire.
+    releaseContextHandoffLease(this.paths.ctxRoot, this.agent.name);
+    this.ctxHandoffLeaseId = null;
 
     // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
     hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);
@@ -1121,6 +1307,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       if (!existsSync(this.ctxCircuitFile)) return;
       const data = JSON.parse(readFileSync(this.ctxCircuitFile, 'utf-8'));
       this.ctxCircuitRestarts = Array.isArray(data.restarts) ? data.restarts : [];
+      this.ctxHandoffFires = Array.isArray(data.handoffFires) ? data.handoffFires : [];
       this.ctxCircuitBrokenAt = typeof data.brokenAt === 'number' ? data.brokenAt : null;
     } catch {
       // Start fresh on error
@@ -1134,6 +1321,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     try {
       writeFileSync(this.ctxCircuitFile, JSON.stringify({
         restarts: this.ctxCircuitRestarts,
+        handoffFires: this.ctxHandoffFires,
         brokenAt: this.ctxCircuitBrokenAt,
       }), 'utf-8');
     } catch {

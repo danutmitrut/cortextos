@@ -157,7 +157,21 @@ export interface AgentConfig {
   startup_delay?: number;
   max_session_seconds?: number;
   max_crashes_per_day?: number;
+  /**
+   * Sliding-window crash-loop detector. When N crashes occur within the window,
+   * the agent auto-pauses (status: 'halted') instead of retrying. Absent = legacy
+   * daily counter only.
+   */
+  crash_window?: { seconds: number; max_crashes?: number };
   model?: string;
+  /**
+   * Whether to launch Claude Code with `--dangerously-skip-permissions`.
+   * Defaults to true (back-compat: agents run unattended). Set to false to keep
+   * Claude Code's permission system engaged so the PermissionRequest hook
+   * (hook-permission-telegram) gates tool use instead of everything auto-running.
+   * Only applies to the claude-code runtime (Hermes never passes the flag).
+   */
+  dangerously_skip_permissions?: boolean;
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
@@ -181,12 +195,25 @@ export interface AgentConfig {
    */
   codex_context_cap?: number;
   /**
+   * Fallback context window cap (tokens) for opencode agents when the OpenCode
+   * model cache does not expose a context limit. Only applies to runtime:
+   * 'opencode'.
+   */
+  opencode_context_cap?: number;
+  /**
    * Agent runtime. Defaults to 'claude-code' when absent.
    * 'hermes' selects the HermesPTY spawn path (Python persistent REPL,
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session
    * continuity, and exit handling.
+   * 'opencode' selects the OpencodePTY spawn path, a native PTY terminal
+   * runtime for opencode.ai's OpenCode CLI.
    */
-  runtime?: 'claude-code' | 'hermes' | 'codex-app-server';
+  runtime?: 'claude-code' | 'hermes' | 'codex-app-server' | 'opencode';
+  /**
+   * Optional OpenCode agent name to pass as `opencode --agent <name>`.
+   * Only applies to runtime: 'opencode'.
+   */
+  opencode_agent?: string;
   /**
    * Whether this agent runs a Telegram poller. Defaults to true when absent
    * (preserves existing behaviour). Set to false on specialist agents that
@@ -748,6 +775,12 @@ export interface IPCResponse {
   success: boolean;
   data?: unknown;
   error?: string;
+  /**
+   * Structured error code for failed responses. Lets operators distinguish
+   * "agent does not exist" (NOT_FOUND) from "request collapsed against an
+   * in-flight identical op" (DEDUPED). See issue #346.
+   */
+  code?: 'NOT_FOUND' | 'DEDUPED' | 'INVALID_INPUT' | 'NOT_RUNNING';
 }
 
 // Agent Discovery Types

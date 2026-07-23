@@ -18,22 +18,15 @@ vi.mock('../../../src/daemon/agent-process.js', () => ({
     async stop() { /* no-op */ }
     getStatus() { return { name: this.name, status: 'stopped' }; }
     onExit() { /* no-op */ }
-    onStatusChanged() { /* no-op */ }
-    setTelegramHandle() { /* no-op */ }
-    injectMessage() { return false; }
   },
 }));
 
 // Mock FastChecker so it doesn't try to spawn anything either.
 vi.mock('../../../src/daemon/fast-checker.js', () => ({
   FastChecker: class {
-    start() { return Promise.resolve(); }
+    start() { /* no-op */ }
     stop() { /* no-op */ }
     wake() { /* no-op */ }
-    queueTelegramMessage() { /* no-op */ }
-    isDuplicate() { return false; }
-    handleCallback() { return Promise.resolve(); }
-    handleActivityCallback() { return Promise.resolve(); }
   },
 }));
 
@@ -49,35 +42,6 @@ vi.mock('../../../src/telegram/poller.js', () => ({
     start() { /* no-op */ }
     stop() { /* no-op */ }
   },
-}));
-
-// Mock Slack modules so we don't try to make HTTP calls or start WebSocket clients.
-const mockSlackPollerStart = vi.fn().mockResolvedValue(undefined);
-const mockSlackPollerStop = vi.fn().mockResolvedValue(undefined);
-const mockSlackPollerOnMessage = vi.fn();
-let capturedSlackMessageHandler: ((event: { user?: string; text?: string; channel: string; ts: string; type: string }) => void) | undefined;
-
-vi.mock('../../../src/slack/poller.js', () => ({
-  SlackPoller: class {
-    onMessage(handler: (event: { user?: string; text?: string; channel: string; ts: string; type: string }) => void) {
-      mockSlackPollerOnMessage(handler);
-      capturedSlackMessageHandler = handler;
-    }
-    start() { return mockSlackPollerStart(); }
-    stop() { return mockSlackPollerStop(); }
-  },
-}));
-
-const mockSlackApiSendMessage = vi.fn().mockResolvedValue('ts-123');
-
-vi.mock('../../../src/slack/api.js', () => ({
-  SlackAPI: class {
-    sendMessage(channelId: string, text: string) { return mockSlackApiSendMessage(channelId, text); }
-  },
-}));
-
-vi.mock('../../../src/slack/logging.js', () => ({
-  logInboundSlack: vi.fn(),
 }));
 
 const { AgentManager } = await import('../../../src/daemon/agent-manager.js');
@@ -335,7 +299,17 @@ describe('buildReplyContext - Telegram reply context (BUG fix: media replies los
 
   it('returns caption for media messages with captions', () => {
     const msg = { message_id: 2, chat: { id: 1 }, photo: [{ file_id: 'x', width: 100, height: 100, file_size: 1 }], caption: 'Check this out' };
-    expect(buildReplyContext(msg)).toBe('Check this out');
+    expect(buildReplyContext(msg)).toBe('Check this out\n[photo]');
+  });
+
+  it('returns caption plus document name for document replies with captions', () => {
+    const msg = {
+      message_id: 12,
+      chat: { id: 1 },
+      caption: 'Code review done — full HTML breakdown attached.',
+      document: { file_id: 'd3', file_name: 'hermes-memory-review.html' },
+    };
+    expect(buildReplyContext(msg)).toBe('Code review done — full HTML breakdown attached.\n[document: hermes-memory-review.html]');
   });
 
   it('returns [video] for video messages without caption', () => {
@@ -480,197 +454,5 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
     const result = am.reloadCrons('ghost');
     expect(result).toBe(false);
     expect((am as any).cronSchedulers.has('ghost')).toBe(false);
-  });
-});
-
-describe('AgentManager Slack integration', () => {
-  let testDir: string;
-  let ctxRoot: string;
-  let frameworkRoot: string;
-
-  beforeEach(() => {
-    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-slack-'));
-    ctxRoot = join(testDir, 'instance');
-    frameworkRoot = join(testDir, 'framework');
-    mkdirSync(join(ctxRoot, 'config'), { recursive: true });
-    mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
-    mockSlackPollerStart.mockClear();
-    mockSlackPollerStop.mockClear();
-    mockSlackPollerOnMessage.mockClear();
-    capturedSlackMessageHandler = undefined;
-  });
-
-  afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
-  });
-
-  it('Slack poller starts when SLACK credentials present (including SLACK_ALLOWED_USER)', async () => {
-    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C12345678',
-        'SLACK_ALLOWED_USER=U111222333',
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    // SlackPoller.start() must have been called
-    expect(mockSlackPollerStart).toHaveBeenCalledTimes(1);
-    // slackPoller reference must be stored on the entry
-    const entry = (am as any).agents.get('alice');
-    expect(entry.slackPoller).toBeDefined();
-  });
-
-  it('Slack message injected into checker as formatted string', async () => {
-    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C12345678',
-        'SLACK_ALLOWED_USER=U99999',
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    // Grab the checker and spy on queueTelegramMessage
-    const entry = (am as any).agents.get('alice');
-    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
-
-    // Simulate a Slack message arriving
-    expect(capturedSlackMessageHandler).toBeDefined();
-    capturedSlackMessageHandler!({
-      type: 'message',
-      channel: 'C12345678',
-      user: 'U99999',
-      text: 'Hello from Slack',
-      ts: '1234567890.000000',
-    });
-
-    // Checker must receive the message formatted with the new multi-line format
-    expect(queueSpy).toHaveBeenCalledWith(
-      expect.stringContaining('=== SLACK from U99999 (channel:C12345678) ==='),
-    );
-    expect(queueSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Hello from Slack'),
-    );
-  });
-
-  it('Slack poller stopped on stopAgent', async () => {
-    // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C12345678',
-        'SLACK_ALLOWED_USER=U111222333',
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    // Verify the poller started
-    expect(mockSlackPollerStart).toHaveBeenCalledTimes(1);
-
-    // Stop the agent and verify slackPoller.stop() was called
-    await am.stopAgent('alice');
-    expect(mockSlackPollerStop).toHaveBeenCalledTimes(1);
-  });
-
-  it('ignores Slack messages from wrong channel', async () => {
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C111',
-        'SLACK_ALLOWED_USER=U99999',
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    const entry = (am as any).agents.get('alice');
-    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
-
-    expect(capturedSlackMessageHandler).toBeDefined();
-    capturedSlackMessageHandler!({
-      type: 'message',
-      channel: 'C999',
-      user: 'U99999',
-      text: 'Message from wrong channel',
-      ts: '1234567890.000000',
-    });
-
-    // Message from a different channel must be silently dropped
-    expect(queueSpy).not.toHaveBeenCalled();
-  });
-
-  it('does not start Slack poller when SLACK_ALLOWED_USER is missing', async () => {
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C12345678',
-        // SLACK_ALLOWED_USER intentionally absent
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    // Poller must not start when SLACK_ALLOWED_USER is missing
-    expect(mockSlackPollerStart).not.toHaveBeenCalled();
-    // No onMessage handler should have been registered
-    expect(mockSlackPollerOnMessage).not.toHaveBeenCalled();
-  });
-
-  it('formats injected Slack message with reply directive', async () => {
-    writeFileSync(
-      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
-      [
-        'SLACK_BOT_TOKEN=xoxb-test-token',
-        'SLACK_APP_TOKEN=xapp-test-token',
-        'SLACK_CHANNEL_ID=C12345678',
-        'SLACK_ALLOWED_USER=U99999',
-      ].join('\n'),
-    );
-
-    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
-    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
-    await am.startAgent('alice', agentDir, {}, 'acme');
-
-    const entry = (am as any).agents.get('alice');
-    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
-
-    expect(capturedSlackMessageHandler).toBeDefined();
-    capturedSlackMessageHandler!({
-      type: 'message',
-      channel: 'C12345678',
-      user: 'U99999',
-      text: 'Hello agent',
-      ts: '1234567890.000000',
-    });
-
-    expect(queueSpy).toHaveBeenCalledTimes(1);
-    const injected: string = queueSpy.mock.calls[0][0];
-    expect(injected).toContain('Reply using:');
   });
 });
