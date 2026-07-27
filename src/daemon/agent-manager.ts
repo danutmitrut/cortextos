@@ -378,7 +378,7 @@ export class AgentManager {
     let slackBotToken: string | undefined;
     let slackAppToken: string | undefined;
     let slackChannelId: string | undefined;
-    let slackAllowedUserId: string | undefined;
+    let slackAllowedUserIds: string[] | undefined;
 
     if (existsSync(agentEnvFile)) {
       const envContent = readFileSync(agentEnvFile, 'utf-8');
@@ -386,7 +386,20 @@ export class AgentManager {
       slackBotToken = match('SLACK_BOT_TOKEN');
       slackAppToken = match('SLACK_APP_TOKEN');
       slackChannelId = match('SLACK_CHANNEL_ID');
-      slackAllowedUserId = match('SLACK_ALLOWED_USER');
+      const slackAllowedUser = match('SLACK_ALLOWED_USER');
+      // SLACK_ALLOWED_USER accepts one or more Slack user IDs. This mirrors
+      // Telegram's multi-user allowlist while keeping Slack fail-closed.
+      // Slack member IDs normally start with U; W-prefixed IDs are valid in
+      // Enterprise Grid workspaces. Whitespace around comma-separated IDs is
+      // tolerated, but a malformed item rejects the whole configuration.
+      if (slackAllowedUser) {
+        const ids = slackAllowedUser.split(',').map((id) => id.trim()).filter(Boolean);
+        if (ids.length === 0 || !ids.every((id) => /^[UW][A-Z0-9]+$/.test(id))) {
+          log('SECURITY: SLACK_ALLOWED_USER must be a comma-separated list of Slack user IDs (e.g. U0123456789,U9876543210). Refusing to enable Slack. Fix the .env file.');
+        } else {
+          slackAllowedUserIds = ids;
+        }
+      }
       if (slackBotToken && slackChannelId) {
         log(`Slack configured (channel: ****${slackChannelId.slice(-4)})`);
       }
@@ -751,8 +764,8 @@ export class AgentManager {
       // Security: SLACK_ALLOWED_USER is required for inbound Slack.
       // Without it, anyone who messages the bot can control the agent.
       // Fail closed: refuse to start the poller if SLACK_ALLOWED_USER is missing.
-      if (!slackAllowedUserId) {
-        log(`SECURITY: SLACK_APP_TOKEN is set but SLACK_ALLOWED_USER is missing. Refusing to start Slack poller. Set SLACK_ALLOWED_USER to your Slack user ID in .env.`);
+      if (!slackAllowedUserIds) {
+        log('SECURITY: SLACK_APP_TOKEN is set but SLACK_ALLOWED_USER is missing or malformed. Refusing to start Slack poller. Set SLACK_ALLOWED_USER to one or more comma-separated Slack user IDs in .env.');
       } else {
         const slackPoller = new SlackPoller(slackAppToken, slackBotToken);
 
@@ -818,8 +831,8 @@ export class AgentManager {
           const currentEntry = this.agents.get(name);
           if (!currentEntry) return;
 
-          // SLACK_ALLOWED_USER gate: ignore messages from other users
-          if (event.user !== slackAllowedUserId) {
+          // SLACK_ALLOWED_USER gate: ignore messages from other users.
+          if (!event.user || !slackAllowedUserIds.includes(event.user)) {
             log(`Ignoring Slack message from unauthorized user (allowed_user gate)`);
             return;
           }
@@ -853,7 +866,7 @@ export class AgentManager {
           const currentEntry = this.agents.get(name);
           if (!currentEntry) return;
           for (const event of missed) {
-            if (event.user !== slackAllowedUserId) continue;
+            if (!event.user || !slackAllowedUserIds.includes(event.user)) continue;
             logInboundSlack(this.ctxRoot, name, event);
             if (injectSlackMedia(event)) continue;
             const text = event.text ?? '';

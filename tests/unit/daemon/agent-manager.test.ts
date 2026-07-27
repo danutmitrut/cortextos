@@ -566,6 +566,50 @@ describe('AgentManager Slack integration', () => {
     );
   });
 
+  it('accepts messages from every user in a comma-separated SLACK_ALLOWED_USER allowlist', async () => {
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
+      [
+        'SLACK_BOT_TOKEN=xoxb-test-token',
+        'SLACK_APP_TOKEN=xapp-test-token',
+        'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U11111, U22222',
+      ].join('\n'),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    const entry = (am as any).agents.get('alice');
+    const queueSpy = vi.spyOn(entry.checker, 'queueTelegramMessage');
+
+    capturedSlackMessageHandler!({
+      type: 'message', channel: 'C12345678', user: 'U22222', text: 'Second user', ts: '1234567890.000000',
+    });
+
+    expect(queueSpy).toHaveBeenCalledWith(expect.stringContaining('=== SLACK from U22222 (channel:C12345678) ==='));
+  });
+
+  it('does not start Slack poller when SLACK_ALLOWED_USER contains an invalid ID', async () => {
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', '.env'),
+      [
+        'SLACK_BOT_TOKEN=xoxb-test-token',
+        'SLACK_APP_TOKEN=xapp-test-token',
+        'SLACK_CHANNEL_ID=C12345678',
+        'SLACK_ALLOWED_USER=U11111,not-a-slack-id',
+      ].join('\n'),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    expect(mockSlackPollerStart).not.toHaveBeenCalled();
+    expect(mockSlackPollerOnMessage).not.toHaveBeenCalled();
+  });
+
   it('Slack poller stopped on stopAgent', async () => {
     // Write .env with all required Slack credentials including SLACK_ALLOWED_USER
     writeFileSync(
