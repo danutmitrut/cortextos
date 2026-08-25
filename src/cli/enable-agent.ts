@@ -125,9 +125,10 @@ export const enableAgentCommand = new Command('enable')
   .option('--org <org>', 'Organization name')
   .description('Enable an agent (register and start)')
   .action(async (agent: string, options: { instance: string; org?: string }) => {
-    // Becky bug preflight: verify .env has BOT_TOKEN and CHAT_ID before registering.
-    // Without this, the agent starts, inherits parent-process credentials silently,
-    // appears alive on the dashboard but cannot receive any Telegram messages.
+    // Becky bug preflight: verify .env has at least one complete user channel
+    // before registering. Without this, the agent may inherit parent-process
+    // credentials silently, appear alive on the dashboard, but never receive
+    // user messages.
     const projectRoot = discoverProjectRoot();
 
     // Auto-detect org if not specified by scanning orgs/ for this agent
@@ -170,19 +171,21 @@ export const enableAgentCommand = new Command('enable')
       console.error(`  - ${join(projectRoot, 'agents', agent, '.env')}`);
       console.error(`Project root: ${projectRoot}`);
       console.error(`(Set CTX_FRAMEWORK_ROOT to override path discovery, or run from inside ~/cortextos.)`);
-      console.error(`Create the .env with BOT_TOKEN and CHAT_ID before enabling.`);
+      console.error(`Create the .env with BOT_TOKEN+CHAT_ID (Telegram) or SLACK_BOT_TOKEN+SLACK_CHANNEL_ID (Slack) before enabling.`);
       process.exit(1);
     }
 
     const env = parseEnvFile(agentEnvPath);
-    const missing = (['BOT_TOKEN', 'CHAT_ID'] as const).filter(k => !env[k]);
-    if (missing.length > 0) {
-      console.error(`Error: .env for agent "${agent}" is missing required values: ${missing.join(', ')}`);
-      console.error(`Edit ${agentEnvPath} and set BOT_TOKEN and CHAT_ID before enabling.`);
+    const hasTelegram = Boolean(env.BOT_TOKEN && env.CHAT_ID);
+    const hasSlack = Boolean(env.SLACK_BOT_TOKEN && env.SLACK_CHANNEL_ID);
+    if (!hasTelegram && !hasSlack) {
+      console.error(`Error: .env for agent "${agent}" is missing a complete user channel.`);
+      console.error(`Edit ${agentEnvPath} and set BOT_TOKEN+CHAT_ID (Telegram) or SLACK_BOT_TOKEN+SLACK_CHANNEL_ID (Slack) before enabling.`);
       process.exit(1);
     }
 
-    // self-chat trap preflight: validate BOT_TOKEN + CHAT_ID against the live
+    // self-chat trap preflight: when Telegram is configured, validate
+    // BOT_TOKEN + CHAT_ID against the live
     // Telegram API before registering. Catches bad tokens, unreachable chats,
     // bot-recipient configs, and the self_chat trap (CHAT_ID == bot's own
     // user id) BEFORE the agent boots up on a silently broken config. Without
@@ -194,30 +197,34 @@ export const enableAgentCommand = new Command('enable')
     // bot_recipient, self_chat). Warns but does not block on transient
     // reasons (network_error, rate_limited) so offline enable and burst
     // enables during the morning cascade still succeed.
-    try {
-      const telegramApi = new TelegramAPI(env.BOT_TOKEN);
-      const validation = await telegramApi.validateCredentials(env.CHAT_ID);
-      if (validation.ok) {
-        const label = validation.chatTitle ? ` (${validation.chatTitle})` : '';
-        console.log(
-          `Telegram validated: bot=@${validation.botUsername} chat=${env.CHAT_ID} type=${validation.chatType}${label}`,
-        );
-      } else if (validation.reason === 'network_error' || validation.reason === 'rate_limited') {
-        console.error(`Warning: could not verify Telegram credentials (${validation.reason}).`);
-        console.error(`  ${formatValidateError(validation)}`);
-        console.error('  Continuing anyway — re-run enable after connectivity is restored to confirm.');
-      } else {
-        console.error(`Error: Telegram credentials for agent "${agent}" failed validation.`);
-        console.error(`  ${formatValidateError(validation)}`);
-        console.error(`  Edit ${agentEnvPath} and re-run: cortextos enable ${agent}`);
-        process.exit(1);
+    if (hasTelegram) {
+      try {
+        const telegramApi = new TelegramAPI(env.BOT_TOKEN);
+        const validation = await telegramApi.validateCredentials(env.CHAT_ID);
+        if (validation.ok) {
+          const label = validation.chatTitle ? ` (${validation.chatTitle})` : '';
+          console.log(
+            `Telegram validated: bot=@${validation.botUsername} chat=${env.CHAT_ID} type=${validation.chatType}${label}`,
+          );
+        } else if (validation.reason === 'network_error' || validation.reason === 'rate_limited') {
+          console.error(`Warning: could not verify Telegram credentials (${validation.reason}).`);
+          console.error(`  ${formatValidateError(validation)}`);
+          console.error('  Continuing anyway — re-run enable after connectivity is restored to confirm.');
+        } else {
+          console.error(`Error: Telegram credentials for agent "${agent}" failed validation.`);
+          console.error(`  ${formatValidateError(validation)}`);
+          console.error(`  Edit ${agentEnvPath} and re-run: cortextos enable ${agent}`);
+          process.exit(1);
+        }
+      } catch (err) {
+        // Defensive: validateCredentials should never throw, but if it does,
+        // fall through with a warning rather than blocking enable on a bug in
+        // the validator itself.
+        console.error(`Warning: Telegram credential validation crashed: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('  Continuing enable. Investigate the validator if this recurs.');
       }
-    } catch (err) {
-      // Defensive: validateCredentials should never throw, but if it does,
-      // fall through with a warning rather than blocking enable on a bug in
-      // the validator itself.
-      console.error(`Warning: Telegram credential validation crashed: ${err instanceof Error ? err.message : String(err)}`);
-      console.error('  Continuing enable. Investigate the validator if this recurs.');
+    } else {
+      console.log(`Slack configured: channel=${env.SLACK_CHANNEL_ID} allowed_user=${env.SLACK_ALLOWED_USER ? 'enabled' : 'not set'}`);
     }
 
     const agents = readEnabledAgents(options.instance);

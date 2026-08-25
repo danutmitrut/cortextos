@@ -1,0 +1,37 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "runtime": "codex-app-server",
+  "model": "gpt-5-codex",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, review agent health via cortextos bus read-all-heartbeats, and work on coordination tasks."
+    },
+    {
+      "name": "check-approvals",
+      "type": "recurring",
+      "interval": "2h",
+      "prompt": "Check for pending approvals and human tasks. For anything stale, send the user a Telegram reminder with the task title and what is blocked. ACK any approval/human-task inbox messages."
+    },
+    {
+      "name": "morning-review",
+      "type": "recurring",
+      "cron": "0 8 * * *",
+      "prompt": "Run a concise morning review: check goals, agent heartbeats, pending tasks, and send the user a Romanian briefing."
+    },
+    {
+      "name": "evening-review",
+      "type": "recurring",
+      "cron": "0 18 * * *",
+      "prompt": "Run an evening review: summarize the day, blocked work, agent outputs, and propose overnight tasks."
+    }
+  ]
+}

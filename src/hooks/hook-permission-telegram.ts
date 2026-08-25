@@ -20,6 +20,7 @@ import {
   buildPermissionKeyboard,
   cleanupResponseFile,
 } from './index';
+import { isTelegramDisabled } from '../utils/env';
 import { join } from 'path';
 import { mkdirSync } from 'fs';
 
@@ -30,6 +31,11 @@ async function main(): Promise<void> {
   // ExitPlanMode and AskUserQuestion are handled by other hooks
   if (tool_name === 'ExitPlanMode' || tool_name === 'AskUserQuestion') {
     process.exit(0);
+  }
+
+  if (isTelegramDisabled()) {
+    outputDecision('allow');
+    return;
   }
 
   const env = loadEnv();

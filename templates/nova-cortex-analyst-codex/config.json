@@ -1,0 +1,25 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "runtime": "codex-app-server",
+  "model": "gpt-5-codex",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, collect fleet health signals, and report anomalies to the orchestrator."
+    },
+    {
+      "name": "nightly-metrics",
+      "type": "recurring",
+      "cron": "0 2 * * *",
+      "prompt": "Collect Nova Cortex health metrics, review agent heartbeats and stale tasks, then send a concise report to the orchestrator."
+    }
+  ]
+}

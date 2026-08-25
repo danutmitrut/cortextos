@@ -9,10 +9,11 @@ import type { BusPaths } from '../types/index.js';
 // --- Types ---
 
 export interface AutoCommitReport {
-  status: 'staged' | 'clean' | 'nothing_to_stage' | 'dry_run';
+  status: 'staged' | 'clean' | 'nothing_to_stage' | 'dry_run' | 'error';
   staged: string[];
   blocked: string[];
   diff_stat?: string;
+  error_message?: string;
 }
 
 export interface AgentGoalStatus {
@@ -43,7 +44,7 @@ const EXCLUDED_DIR_PREFIXES = [
   '.venv/',
 ];
 
-const CREDENTIAL_PATTERNS = /(?:token=|key=|password=|secret=|sk-|ghp_|xoxb-|AKIA)/;
+const CREDENTIAL_PATTERNS = /(?:token=|key=|password=|secret=|sk-[A-Za-z0-9_-]{20,}|ghp_|xoxb-|AKIA)/;
 
 const SCRIPT_EXTENSIONS = new Set(['.sh', '.py', '.js']);
 
@@ -102,15 +103,16 @@ export function autoCommit(projectDir: string, dryRun: boolean = false): AutoCom
   try {
     execSync('git rev-parse --is-inside-work-tree', { cwd: projectDir, stdio: 'pipe' });
   } catch {
-    return { status: 'clean', staged: [], blocked: [] };
+    return { status: 'error', staged: [], blocked: [], error_message: `not a git work tree: ${projectDir}` };
   }
 
   // Get changed files
   let porcelainOutput: string;
   try {
     porcelainOutput = execSync('git status --porcelain', { cwd: projectDir, encoding: 'utf-8' });
-  } catch {
-    return { status: 'clean', staged: [], blocked: [] };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'error', staged: [], blocked: [], error_message: `git status failed: ${msg}` };
   }
 
   if (!porcelainOutput.trim()) {

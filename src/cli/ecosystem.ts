@@ -139,6 +139,7 @@ module.exports = {
         CTX_FRAMEWORK_ROOT: ${JSON.stringify(projectRoot)},
         CTX_PROJECT_ROOT: ${JSON.stringify(projectRoot)},
         CTX_ORG: process.env.CTX_ORG || ${JSON.stringify(detectedOrg)},
+        CTX_TELEGRAM_DISABLED: process.env.CTX_TELEGRAM_DISABLED || '',
       },
       max_restarts: 50,
       restart_delay: 5000,

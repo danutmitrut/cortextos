@@ -16,6 +16,7 @@ import {
   buildPlanKeyboard,
   cleanupResponseFile,
 } from './index';
+import { isTelegramDisabled } from '../utils/env';
 import { join } from 'path';
 import { mkdirSync, readFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
@@ -59,6 +60,11 @@ function readPlanContent(planPath: string): string {
 async function main(): Promise<void> {
   const input = await readStdin();
   const { tool_input } = parseHookInput(input);
+
+  if (isTelegramDisabled()) {
+    outputDecision('allow');
+    return;
+  }
 
   const env = loadEnv();
 

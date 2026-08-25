@@ -12,8 +12,11 @@
  */
 
 import { loadEnv } from './index.js';
+import { isTelegramDisabled } from '../utils/env.js';
 
 async function main(): Promise<void> {
+  if (isTelegramDisabled()) return;
+
   const env = loadEnv();
 
   if (!env.botToken || !env.chatId) return;

@@ -84,13 +84,32 @@ export class TelegramPoller {
 
   /**
    * Start the polling loop.
+   *
+   * Transient errors (network blips, an offline/asleep machine) are handled
+   * with exponential backoff and deduplicated logging. Without this, a laptop
+   * that loses connectivity for a few hours makes every poller hot-loop at
+   * `pollInterval` (1s) and write a full 6-line stack trace on each failure —
+   * one overnight outage produced a 56MB error log across the fleet. Backoff
+   * caps the retry rate at MAX_BACKOFF_MS while offline; dedup collapses an
+   * identical error streak to a handful of log lines; both reset on the first
+   * successful poll, which also logs a one-line recovery marker.
    */
   async start(): Promise<void> {
     this.running = true;
     this.lastExitReason = '';
+    const MAX_BACKOFF_MS = 30_000; // ceiling while the network stays down
+    let consecutiveErrors = 0;
+    let lastErrorMsg = '';
     while (this.running) {
       try {
         await this.pollOnce();
+        // Success: if we were in an error streak, note the recovery once and
+        // reset backoff/dedup state so the loop returns to normal cadence.
+        if (consecutiveErrors > 0) {
+          console.error(`[telegram-poller] Recovered after ${consecutiveErrors} failed poll(s).`);
+          consecutiveErrors = 0;
+          lastErrorMsg = '';
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // A 409 Conflict means another getUpdates connection holds the lock
@@ -102,8 +121,22 @@ export class TelegramPoller {
           this.running = false;
           return;
         }
-        // Other errors are transient — log and continue polling.
-        console.error('[telegram-poller] Poll error:', err);
+        // Other errors are transient. Dedup the logging: emit on the first
+        // occurrence, whenever the message changes, or every 60th consecutive
+        // failure — so a multi-hour outage yields a few lines, not thousands.
+        consecutiveErrors++;
+        if (msg !== lastErrorMsg || consecutiveErrors % 60 === 0) {
+          console.error(`[telegram-poller] Poll error (attempt ${consecutiveErrors}):`, err);
+          lastErrorMsg = msg;
+        }
+        // Exponential backoff: pollInterval, 2x, 4x... capped at MAX_BACKOFF_MS.
+        // The exponent is clamped so `2 ** n` cannot overflow on a long outage.
+        const backoff = Math.min(
+          this.pollInterval * 2 ** Math.min(consecutiveErrors - 1, 10),
+          MAX_BACKOFF_MS,
+        );
+        await sleep(backoff);
+        continue; // already slept for the backoff; skip the normal interval
       }
       await sleep(this.pollInterval);
     }

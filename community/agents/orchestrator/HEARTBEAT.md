@@ -42,8 +42,9 @@ cortextos bus read-all-heartbeats
 # Check all pending approvals
 cortextos bus list-approvals --format json 2>/dev/null
 
-# Check stale human tasks
-cortextos bus list-tasks --project human-tasks --status pending 2>/dev/null
+# Check pending human tasks (titles prefixed with [HUMAN] are the convention)
+cortextos bus list-tasks --status pending --format json 2>/dev/null \
+  | jq '[.[] | select(.title | startswith("[HUMAN]"))]'
 ```
 
 For each agent: if heartbeat is older than 5 hours, send an alert to that agent and flag in memory.
@@ -160,7 +161,7 @@ Keep your memory collection searchable and current:
 
 ```bash
 cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
-  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --collection memory-$CTX_AGENT_NAME --force
+  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 ```
 
 This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.

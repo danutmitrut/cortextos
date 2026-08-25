@@ -19,6 +19,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
 import { WebClient } from '@slack/web-api';
+import { isTelegramDisabled } from '../utils/env';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -266,6 +267,16 @@ export function classifyFromMarkers(
   return { endType: 'crash', reason: '' };
 }
 
+/**
+ * Telegram crash-alert send is enabled only when the flag is off AND both
+ * creds are present. Extracted so the decoupling is unit-testable: when this
+ * is false the Telegram fetch is skipped but the Slack block still runs
+ * (the old `if (!botToken || !chatId) return;` used to skip Slack too).
+ */
+export function telegramSendEnabled(botToken: string | undefined, chatId: string | undefined): boolean {
+  return !isTelegramDisabled() && !!botToken && !!chatId;
+}
+
 async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
@@ -391,16 +402,12 @@ async function main(): Promise<void> {
     });
   }
 
-  // Gate independently: Telegram and Slack are separate channels. With
-  // Telegram retired in this org, the bus alert above (notifyAgents) plus
-  // the Slack send below must remain reachable even with no BOT_TOKEN/CHAT_ID.
+  // Gate Telegram and Slack independently — the early-return on
+  // !BOT_TOKEN/!CHAT_ID used to also skip the Slack block, masking crashes
+  // on Telegram-disabled agents. telegramSendEnabled() honors the runtime
+  // flag and is unit-testable; Slack is gated on its own creds below.
   const botToken = process.env.BOT_TOKEN;
   const chatId = process.env.CHAT_ID;
-  const slackBotToken = process.env.SLACK_BOT_TOKEN;
-  const slackChannelId = process.env.SLACK_CHANNEL_ID;
-  const hasTelegram = !!(botToken && chatId);
-  const hasSlack = !!(slackBotToken && slackChannelId);
-  if (!hasTelegram && !hasSlack) return;
 
   let message = '';
   switch (endType) {
@@ -447,7 +454,7 @@ async function main(): Promise<void> {
       break;
   }
 
-  if (message && hasTelegram) {
+  if (message && telegramSendEnabled(botToken, chatId)) {
     try {
       const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
       await fetch(url, {
@@ -458,7 +465,9 @@ async function main(): Promise<void> {
     } catch { /* ignore send failures */ }
   }
 
-  if (message && hasSlack) {
+  const slackBotToken = process.env.SLACK_BOT_TOKEN;
+  const slackChannelId = process.env.SLACK_CHANNEL_ID;
+  if (message && slackBotToken && slackChannelId) {
     try {
       await sendSlackCrashAlert(slackBotToken, slackChannelId, message);
     } catch { /* ignore send failures */ }

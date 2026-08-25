@@ -223,3 +223,74 @@ describe('TelegramPoller — offset-after-handler', () => {
     }
   });
 });
+
+describe('TelegramPoller — backoff and dedup on transient errors', () => {
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-poller-backoff-'));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('logs an identical transient-error streak once, and backs off (no 1/s hot-loop)', async () => {
+    const api = {
+      getUpdates: vi.fn(async () => {
+        throw new Error('Telegram API request failed: TypeError: fetch failed');
+      }),
+    } as unknown as TelegramAPI;
+    const poller = new TelegramPoller(api, stateDir, 1000);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const loop = poller.start();
+    // Advance past several exponential backoffs (1+2+4+8+16 = 31s of sleeps).
+    await vi.advanceTimersByTimeAsync(40_000);
+
+    // The identical message is logged once (first occurrence), not on every
+    // retry — this is the fix for the overnight 56MB error-log pathology.
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Poll error (attempt 1)'),
+      expect.anything(),
+    );
+    // Backoff throttled retries far below the old 1/s cadence (would be ~40).
+    expect((api.getUpdates as any).mock.calls.length).toBeLessThan(15);
+
+    poller.stop();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await loop;
+    errSpy.mockRestore();
+  });
+
+  it('resets backoff and logs a one-line recovery after a successful poll', async () => {
+    let attempts = 0;
+    const api = {
+      getUpdates: vi.fn(async () => {
+        attempts++;
+        if (attempts <= 3) {
+          throw new Error('Telegram API request failed: TypeError: fetch failed');
+        }
+        return { result: [] }; // network recovered
+      }),
+    } as unknown as TelegramAPI;
+    const poller = new TelegramPoller(api, stateDir, 1000);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const loop = poller.start();
+    // 3 failures (backoff 1+2+4s) then steady success.
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const messages = errSpy.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => m.includes('Poll error (attempt 1)'))).toBe(true);
+    expect(messages.some((m) => m.includes('Recovered after'))).toBe(true);
+
+    poller.stop();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await loop;
+    errSpy.mockRestore();
+  });
+});
