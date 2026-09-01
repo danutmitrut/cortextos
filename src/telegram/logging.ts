@@ -190,6 +190,38 @@ export function readLastSent(
 }
 
 /**
+ * How many prior exchanges to embed as [Recent conversation:] in an injected
+ * Telegram block. **Zero by default — the block is not emitted at all.**
+ *
+ * It was the single largest contributor to block size, and block size is what
+ * the 2026-09-01 Windows truncation reacts to: measured deliveries arrived as
+ * roughly 300 characters of a ~1300-character block, and the surviving portion
+ * came from the HEAD in one capture and from the TAIL in another. Since either
+ * end can be the one that disappears, no amount of reordering is a defence —
+ * only a block small enough that there is nothing to cut. Dropping history
+ * takes a typical block from ~980 to ~250 characters, five times under the
+ * smallest block ever observed to truncate (1276).
+ *
+ * What is actually lost by default: nothing the agent does not already have.
+ * The agent keeps its own conversation, and the daemon re-quoting the last few
+ * exchanges on every single message was belt-and-braces, not a requirement.
+ * `[Your last message: ...]` and `[Replying to: ...]` still carry the immediate
+ * context, capped and cheap.
+ *
+ * Set CTX_TELEGRAM_HISTORY_ENTRIES to a positive integer to bring it back —
+ * reasonable on macOS, where 3769-character blocks arrive intact. Invalid or
+ * negative values read as zero rather than throwing: a malformed env var must
+ * not be able to stop message delivery.
+ */
+export function telegramHistoryEntries(): number {
+  const raw = process.env['CTX_TELEGRAM_HISTORY_ENTRIES'];
+  if (raw === undefined || raw.trim() === '') return 0;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n;
+}
+
+/**
  * Build a short recent conversation snippet for context injection.
  * Reads the last cputime         unlimited
 filesize        unlimited

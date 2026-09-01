@@ -424,6 +424,27 @@ describe('FastChecker', () => {
       expect(/^[\x00-\x7F]*$/.test(label)).toBe(true);
     });
 
+    it('produces a small block in the default shape, with history off', () => {
+      // The default path emits no [Recent conversation:] at all. The reported
+      // failure had ~1300 bytes injected and ~300 arriving, and the surviving
+      // portion came from the HEAD in one capture and the TAIL in another —
+      // either end can be the one that disappears, so the only defence that
+      // always holds is a block small enough to have nothing worth cutting.
+      const result = FastChecker.formatTelegramTextMessage(
+        'Dorina',
+        '551729796',
+        'salut ce prioritati avem pentru azi?',
+        '/opt/cortextos',
+        undefined,
+        'x'.repeat(400),
+      );
+
+      // Smallest block ever observed to truncate in the field: 1276.
+      expect(result.length).toBeLessThan(500);
+      expect(result).not.toContain('[Recent conversation:]');
+      expect(result).toContain('salut ce prioritati avem pentru azi?');
+    });
+
     it('produces a smaller block than the pre-fix format for a realistic message', () => {
       // The reported failure had 1316 bytes injected and 308 arriving. Anything
       // comfortably under ~1000 stayed intact in the field measurements.

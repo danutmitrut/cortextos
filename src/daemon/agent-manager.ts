@@ -14,7 +14,7 @@ import { SlackSocketModeClient } from '../slack/socket-mode.js';
 import { dispatchSlackMessage, makeUserNameResolver, type DispatchTarget } from '../slack/dispatcher.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
-import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
+import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory, telegramHistoryEntries } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
@@ -873,15 +873,19 @@ export class AgentManager {
         const text = stripControlChars(msg.text || '');
         const lastSent = FastChecker.readLastSent(stateDir, effectiveChatId);
 
-        // 4 entries, not 6: history is the largest single contributor to block
-        // size, and oversized blocks are what the 2026-08-31 Windows truncation
-        // reacts to. Four exchanges still carry the thread.
+        // History is off by default (see telegramHistoryEntries): it was the
+        // largest contributor to block size, and block size is the one lever
+        // that works no matter which end of a truncated block survives.
         //
-        // The message id is excluded because recordInboundTelegram() above has
-        // already written THIS message to the inbound log, so without it the
-        // arriving text would appear twice in one block: once as history, once
-        // as the new message.
-        const recentHistory = buildRecentHistory(this.ctxRoot, name, effectiveChatId, 4, msg.message_id) ?? undefined;
+        // When it IS enabled, the message id is excluded because
+        // recordInboundTelegram() above has already written THIS message to the
+        // inbound log — without it the arriving text would appear twice in one
+        // block, once as history and once as the new message, which reads to an
+        // agent as an echo of something already handled.
+        const historyEntries = telegramHistoryEntries();
+        const recentHistory = historyEntries > 0
+          ? buildRecentHistory(this.ctxRoot, name, effectiveChatId, historyEntries, msg.message_id) ?? undefined
+          : undefined;
         const formatted = FastChecker.formatTelegramTextMessage(
           from,
           effectiveChatId,

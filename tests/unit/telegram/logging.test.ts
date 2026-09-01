@@ -9,6 +9,7 @@ import {
   cacheLastSent,
   readLastSent,
   buildRecentHistory,
+  telegramHistoryEntries,
 } from '../../../src/telegram/logging';
 import { TelegramAPI } from '../../../src/telegram/api';
 import type { BusPaths, TelegramMessage } from '../../../src/types';
@@ -279,6 +280,43 @@ describe('Telegram Logging', () => {
       const result = readLastSent(testDir, 'bot1', '000');
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('telegramHistoryEntries', () => {
+  // [Recent conversation:] is off by default. It was the largest contributor to
+  // injected block size, and block size is the only lever that works regardless
+  // of which end of a truncated block survives — captures on 2026-08-31 and
+  // 2026-09-01 kept opposite ends of the block.
+  const ENV = 'CTX_TELEGRAM_HISTORY_ENTRIES';
+  let saved: string | undefined;
+
+  beforeEach(() => { saved = process.env[ENV]; delete process.env[ENV]; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV];
+    else process.env[ENV] = saved;
+  });
+
+  it('is zero when the variable is unset', () => {
+    expect(telegramHistoryEntries()).toBe(0);
+  });
+
+  it('is zero for an empty or whitespace value', () => {
+    process.env[ENV] = '   ';
+    expect(telegramHistoryEntries()).toBe(0);
+  });
+
+  it('returns a positive integer when explicitly opted in', () => {
+    process.env[ENV] = '4';
+    expect(telegramHistoryEntries()).toBe(4);
+  });
+
+  it('treats junk and negatives as off rather than throwing', () => {
+    // A malformed env var must never be able to stop message delivery.
+    for (const v of ['abc', '-3', '0', 'NaN']) {
+      process.env[ENV] = v;
+      expect(telegramHistoryEntries()).toBe(0);
+    }
   });
 });
 
