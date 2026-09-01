@@ -36,6 +36,20 @@ export function handoffGraceMs(runtime: string | undefined): number {
 const WORKFILL_MARGIN = 10;
 
 /**
+ * Character cap for each context preview embedded in an injected Telegram
+ * block ([Your last message: ...] and [Replying to: ...]).
+ *
+ * Was 500. Lowered because block size, not block content, is what the
+ * 2026-08-31 Windows truncation reacts to: measured losses saturated around
+ * ~1026 characters, and a block that stays well under that arrived intact. Two
+ * 500-char previews plus recent history routinely pushed a single block past
+ * 1300 characters, which is where the loss started biting. 200 characters is
+ * still enough for the agent to recognise what it last said; it is not meant to
+ * be a full quote.
+ */
+const CONTEXT_PREVIEW_CHARS = 200;
+
+/**
  * Fast message checker for a single agent.
  * Replaces fast-checker.sh: polls Telegram and inbox, injects into PTY.
  */
@@ -333,7 +347,7 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, 500))}"]\n`;
+      lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, CONTEXT_PREVIEW_CHARS))}"]\n`;
     }
 
     let historyCx = '';
@@ -351,9 +365,29 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
     const body = isSlashCommand
       ? sanitizeForPtyInjection(text).trim()
       : wrapFenceSafe(text);
+    // Ordering is load-bearing, not cosmetic (2026-08-31 Windows field report).
+    // When a block is truncated in transport the HEAD is what disappears, so
+    // whatever sits last is what the agent actually receives. Under the old
+    // ordering that was `[Your last message:]` — the agent's own previous
+    // Telegram message — and the user's new text sat just above the surviving
+    // window. The observable result: the agent answered its own last question
+    // over and over, and reported the incoming message as "an echo" or as
+    // "corrupted/unreadable". Both descriptions were accurate; it never saw the
+    // user's words.
+    //
+    // Context now goes above, the new message goes last. On a truncated block
+    // the user's text is the part most likely to survive, and losing context is
+    // strictly less harmful than losing the input itself.
+    //
+    // The explicit label matters for the same reason: with context sitting
+    // directly above the body, an unlabelled block gives the agent no way to
+    // tell prior conversation from new input. ASCII only, no em dash and no
+    // diacritics — this string crosses a PTY whose encoding behaviour on
+    // Windows is exactly what is under suspicion.
     return `=== TELEGRAM from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) ===
-${replyCx}${historyCx}${body}
-${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}${replyCx}${historyCx}[NEW MESSAGE from the user, answer this:]
+${body}
+Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
   }
@@ -537,7 +571,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
   private static formatReplyContext(replyToText?: string): string {
     return replyToText
-      ? `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, 500))}"]\n`
+      ? `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, CONTEXT_PREVIEW_CHARS))}"]\n`
       : '';
   }
 

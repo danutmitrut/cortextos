@@ -65,19 +65,50 @@ export function injectMessage(
   content: string,
   enterDelay: number = 300,
 ): void {
-  // For very large messages, chunk the write to avoid overwhelming the PTY buffer
-  const MAX_CHUNK = 4096;
+  // Chunk EVERY write, not just oversized ones.
+  //
+  // Why (2026-08-31, Windows field report): a single 1316-char write reached
+  // the agent as its last 308 chars — the first 1008 were gone, cut mid-word,
+  // mid-line. Across five measurements the loss was capped at ~1026 chars and
+  // repeated to the character (1026 three times on blocks of 1643/1316/1376).
+  // A loss that repeats exactly is a boundary, not corruption or a race; the
+  // head is what falls away, so the receiver starts accepting partway into the
+  // stream. The exact layer (node-pty, ConPTY, the TUI's stdin reader) is not
+  // pinned down — reproduction needs a Windows box we do not have — so this is
+  // deliberately a mitigation that holds against the whole class: every write
+  // stays far below any plausible boundary, and the gaps let a slow consumer
+  // drain between them. macOS never showed it (3769-char blocks arrive intact),
+  // which is consistent with ConPTY's chunkier, slower input delivery.
+  //
+  // Kept small enough that even a ~1KB limit cannot bite, large enough that a
+  // 2KB block is ~5 writes and ~75ms — well inside any bracketed-paste timeout.
+  const MAX_CHUNK = 384;
+  const CHUNK_DELAY_MS = 15;
 
-  if (content.length <= MAX_CHUNK) {
-    write(PASTE_START + content + PASTE_END);
-  } else {
-    // Chunked write for large messages
-    write(PASTE_START);
-    for (let i = 0; i < content.length; i += MAX_CHUNK) {
-      write(content.slice(i, i + MAX_CHUNK));
+  // Same reason as the deferred Enter below: the PTY can be torn down between
+  // scheduled chunks, and a dropped chunk must not take the daemon with it.
+  const safeWrite = (data: string): void => {
+    try {
+      write(data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[inject] chunk write failed (pty likely torn down): ${msg}`);
     }
-    write(PASTE_END);
+  };
+
+  const chunks: string[] = [PASTE_START];
+  for (let i = 0; i < content.length; i += MAX_CHUNK) {
+    chunks.push(content.slice(i, i + MAX_CHUNK));
   }
+  chunks.push(PASTE_END);
+
+  chunks.forEach((chunk, idx) => {
+    if (idx === 0) safeWrite(chunk);
+    else setTimeout(() => safeWrite(chunk), idx * CHUNK_DELAY_MS);
+  });
+
+  // Enter waits for the last chunk to have gone out, then the usual settle time.
+  const writeWindow = (chunks.length - 1) * CHUNK_DELAY_MS;
 
   // Send Enter after a short delay to submit the pasted content.
   // Why the try/catch: the write callback captures `this.pty` (or similar
@@ -95,7 +126,7 @@ export function injectMessage(
       const msg = e instanceof Error ? e.message : String(e);
       console.warn(`[inject] deferred Enter failed (pty likely torn down): ${msg}`);
     }
-  }, enterDelay);
+  }, writeWindow + enterDelay);
 }
 
 /**
