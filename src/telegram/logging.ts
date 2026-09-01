@@ -202,12 +202,17 @@ stacksize       7MB
  * Reads the last `limit` messages (combined inbound + outbound) for the
  * given agent/chatId, sorts by timestamp, and returns a formatted string.
  * Returns null if no history is available.
+ *
+ * `excludeMessageId` drops one already-logged inbound message from the result.
+ * Callers that log an arriving message before building its context block pass
+ * that message's id here so it does not appear as both history and new input.
  */
 export function buildRecentHistory(
   ctxRoot: string,
   agentName: string,
   chatId: string | number,
   limit: number = 6,
+  excludeMessageId?: number,
 ): string | null {
   const logDir = join(ctxRoot, 'logs', agentName);
   const inboundPath = join(logDir, 'inbound-messages.jsonl');
@@ -228,6 +233,13 @@ export function buildRecentHistory(
         try {
           const obj = JSON.parse(line);
           if (String(obj.chat_id) !== chatIdStr) continue;
+          // The caller records the inbound message BEFORE asking for history,
+          // so without this the message being delivered right now also shows up
+          // inside [Recent conversation:] — the user's own words arriving twice
+          // in one block. An agent reading that reasonably concludes it is
+          // looking at an echo of something already handled rather than at new
+          // input, which is exactly what was reported from the field.
+          if (excludeMessageId !== undefined && obj.message_id === excludeMessageId) continue;
           const text = (obj.text || '').trim();
           if (!text) continue;
           entries.push({ ts: obj.timestamp || obj.archived_at || '', speaker, text });
@@ -244,8 +256,11 @@ export function buildRecentHistory(
   entries.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
   const recent = entries.slice(-limit);
 
+  // 120 (was 200): with `limit` entries this block is the single largest part of
+  // an injected message. Six 200-char entries alone put a block past 1200
+  // characters, which is where the 2026-08-31 Windows truncation started biting.
   const formatted = recent.map(e => {
-    const preview = e.text.length > 200 ? e.text.slice(0, 200) + '...' : e.text;
+    const preview = e.text.length > 120 ? e.text.slice(0, 120) + '...' : e.text;
     return '[' + e.speaker + ']: ' + preview;
   });
 

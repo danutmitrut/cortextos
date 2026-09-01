@@ -349,7 +349,7 @@ describe('FastChecker', () => {
       expect(result).toContain('Hi');
     });
 
-    it('truncates last-sent text to 500 chars', () => {
+    it('truncates last-sent text to CONTEXT_PREVIEW_CHARS', () => {
       const longText = 'x'.repeat(1000);
       const result = FastChecker.formatTelegramTextMessage(
         'alice',
@@ -360,10 +360,84 @@ describe('FastChecker', () => {
         longText,
       );
 
-      // The lastSentText.slice(0, 500) should limit it
+      // 200, lowered from 500: block size is what the Windows truncation
+      // reacts to, and two 500-char previews alone pushed blocks past 1300.
       const match = result.match(/\[Your last message: "([^"]*)"\]/);
       expect(match).toBeTruthy();
-      expect(match![1].length).toBe(500);
+      expect(match![1].length).toBe(200);
+    });
+
+    it('truncates reply context to the same cap', () => {
+      const result = FastChecker.formatTelegramTextMessage(
+        'alice',
+        '999',
+        'Hello',
+        '/opt/cortextos',
+        'r'.repeat(1000),
+      );
+
+      const match = result.match(/\[Replying to: "([^"]*)"\]/);
+      expect(match).toBeTruthy();
+      expect(match![1].length).toBe(200);
+    });
+
+    it('puts context above the body and the new message last', () => {
+      // Load-bearing ordering: when a block is truncated in transport the HEAD
+      // is lost, so whatever sits last is what the agent actually receives.
+      // With [Your last message:] last, agents answered their own previous
+      // question forever and described the arrival as an echo.
+      const result = FastChecker.formatTelegramTextMessage(
+        'alice',
+        '999',
+        'THE NEW USER TEXT',
+        '/opt/cortextos',
+        'a reply-to quote',
+        'the agents own last message',
+        '[alice]: earlier line',
+      );
+
+      const iLastSent = result.indexOf('[Your last message:');
+      const iReplyTo = result.indexOf('[Replying to:');
+      const iHistory = result.indexOf('[Recent conversation:]');
+      const iLabel = result.indexOf('[NEW MESSAGE from the user, answer this:]');
+      const iBody = result.indexOf('THE NEW USER TEXT');
+      const iReplyUsing = result.indexOf('Reply using:');
+
+      expect(iLastSent).toBeGreaterThan(-1);
+      expect(iLastSent).toBeLessThan(iReplyTo);
+      expect(iReplyTo).toBeLessThan(iHistory);
+      expect(iHistory).toBeLessThan(iLabel);
+      expect(iLabel).toBeLessThan(iBody);
+      expect(iBody).toBeLessThan(iReplyUsing);
+    });
+
+    it('keeps the new-message label pure ASCII', () => {
+      // This string crosses a PTY whose encoding behaviour on Windows is the
+      // very thing under suspicion. No em dash, no diacritics.
+      const result = FastChecker.formatTelegramTextMessage(
+        'alice', '999', 'Hi', '/opt/cortextos',
+      );
+
+      const label = '[NEW MESSAGE from the user, answer this:]';
+      expect(result).toContain(label);
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x00-\x7F]*$/.test(label)).toBe(true);
+    });
+
+    it('produces a smaller block than the pre-fix format for a realistic message', () => {
+      // The reported failure had 1316 bytes injected and 308 arriving. Anything
+      // comfortably under ~1000 stayed intact in the field measurements.
+      const result = FastChecker.formatTelegramTextMessage(
+        'Dorina',
+        '551729796',
+        'salut ce prioritati avem pentru azi?',
+        '/opt/cortextos',
+        undefined,
+        'x'.repeat(400),
+        Array.from({ length: 4 }, (_, i) => `[speaker]: ${'y'.repeat(120)}${i}`).join('\n'),
+      );
+
+      expect(result.length).toBeLessThan(1000);
     });
 
     it('includes reply context when provided', () => {

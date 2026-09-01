@@ -8,6 +8,7 @@ import {
   recordInboundTelegram,
   cacheLastSent,
   readLastSent,
+  buildRecentHistory,
 } from '../../../src/telegram/logging';
 import { TelegramAPI } from '../../../src/telegram/api';
 import type { BusPaths, TelegramMessage } from '../../../src/types';
@@ -278,6 +279,73 @@ describe('Telegram Logging', () => {
       const result = readLastSent(testDir, 'bot1', '000');
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('buildRecentHistory', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-tg-hist-'));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  const writeInbound = (entries: object[]) => {
+    const dir = join(testDir, 'logs', 'bot1');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'inbound-messages.jsonl'),
+      entries.map(e => JSON.stringify(e)).join('\n') + '\n',
+      'utf-8',
+    );
+  };
+
+  it('excludes the message id it is told to exclude', () => {
+    // agent-manager logs an arriving message BEFORE building its context block,
+    // so without the exclusion the same text lands in the block twice: once as
+    // [Recent conversation:], once as the new message. Agents reading that
+    // reported it as an echo of something already answered.
+    writeInbound([
+      { chat_id: '5', message_id: 1, text: 'older question', timestamp: '2026-08-31T08:00:00Z' },
+      { chat_id: '5', message_id: 2, text: 'THE ARRIVING MESSAGE', timestamp: '2026-08-31T08:39:17Z' },
+    ]);
+
+    const withExclusion = buildRecentHistory(testDir, 'bot1', '5', 4, 2);
+    expect(withExclusion).toContain('older question');
+    expect(withExclusion).not.toContain('THE ARRIVING MESSAGE');
+  });
+
+  it('keeps every message when no exclusion is requested', () => {
+    writeInbound([
+      { chat_id: '5', message_id: 1, text: 'older question', timestamp: '2026-08-31T08:00:00Z' },
+      { chat_id: '5', message_id: 2, text: 'THE ARRIVING MESSAGE', timestamp: '2026-08-31T08:39:17Z' },
+    ]);
+
+    const result = buildRecentHistory(testDir, 'bot1', '5', 4);
+    expect(result).toContain('older question');
+    expect(result).toContain('THE ARRIVING MESSAGE');
+  });
+
+  it('caps each entry preview at 120 characters', () => {
+    writeInbound([
+      { chat_id: '5', message_id: 1, text: 'z'.repeat(500), timestamp: '2026-08-31T08:00:00Z' },
+    ]);
+
+    const result = buildRecentHistory(testDir, 'bot1', '5', 4);
+    expect(result).toBeTruthy();
+    const preview = result!.split(': ').slice(1).join(': ');
+    expect(preview).toBe('z'.repeat(120) + '...');
+  });
+
+  it('returns null when nothing matches the chat', () => {
+    writeInbound([
+      { chat_id: '99', message_id: 1, text: 'other chat', timestamp: '2026-08-31T08:00:00Z' },
+    ]);
+
+    expect(buildRecentHistory(testDir, 'bot1', '5', 4)).toBeNull();
   });
 });
 

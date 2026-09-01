@@ -788,6 +788,60 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(out).toBe('just a chat message');
   });
 
+  it('new layout: extracts only the labelled new message, not the context above it', () => {
+    // formatTelegramTextMessage puts every context field ABOVE the body and
+    // marks the body with an explicit label. The old extraction split on
+    // '[Your last message:' — under this layout that marker sits at the top, so
+    // splitting on it would discard the entire message.
+    fsMocks.existsSync.mockReturnValue(false);
+    const inject = `=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+[Your last message: "Is the north star still valid?"]
+[Recent conversation:]
+[James]: earlier line
+[NEW MESSAGE from the user, answer this:]
+\`\`\`
+what are today's priorities?
+\`\`\`
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`;
+    const out = extract(inject);
+    expect(out).toContain("what are today's priorities?");
+    expect(out).not.toContain('Is the north star still valid?');
+    expect(out).not.toContain('earlier line');
+  });
+
+  it('new layout: reply-to context above the label still surfaces', () => {
+    fsMocks.existsSync.mockReturnValue(false);
+    const inject = `=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+[Your last message: "my previous reply"]
+[Replying to: "Created the DOCX and attached it here."]
+[NEW MESSAGE from the user, answer this:]
+\`\`\`
+what's this again?
+\`\`\`
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`;
+    const out = extract(inject);
+    expect(out).toContain("what's this again?");
+    expect(out).toContain('[in reply to: Created the DOCX and attached it here.]');
+  });
+
+  it('legacy layout (body first, last-sent after) still extracts the body', () => {
+    // A block queued before the reordering can outlive a daemon restart, and
+    // the media formatters still emit the old shape.
+    fsMocks.existsSync.mockReturnValue(false);
+    const inject = `=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
+\`\`\`
+legacy body text
+\`\`\`
+[Your last message: "the agents own last message"]
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`;
+    const out = extract(inject);
+    expect(out).toContain('legacy body text');
+    expect(out).not.toContain('the agents own last message');
+  });
+
   it('reply_to with no outbound log: appends bare in-reply-to marker', () => {
     fsMocks.existsSync.mockImplementation((p: string) => !String(p).endsWith('outbound-messages.jsonl'));
     const inject = `=== TELEGRAM from James (chat_id:7940429114) ===

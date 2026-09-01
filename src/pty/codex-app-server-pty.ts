@@ -269,11 +269,22 @@ export class CodexAppServerPTY {
     const chatIdMatch = content.match(/^=== TELEGRAM[^\n]*\(chat_id:(-?\d+)\)/);
     const chatId = chatIdMatch?.[1] ?? null;
 
-    const beforeReply = content
-      .split('\n[Your last message:', 1)[0]
-      .split('\nReply using:', 1)[0];
+    // formatTelegramTextMessage now puts every context field ABOVE the body and
+    // marks the body with an explicit label, so the payload is what follows that
+    // label. Splitting on '[Your last message:' the way this used to would now
+    // discard the entire message, since that marker sits at the top.
+    //
+    // The fallback keeps the old split alive for blocks produced before the
+    // reordering — a queued message can outlive a daemon restart, and media
+    // formatters still emit the old shape.
+    const NEW_MSG_LABEL = '[NEW MESSAGE from the user, answer this:]\n';
+    const withoutReply = content.split('\nReply using:', 1)[0];
+    const labelIdx = withoutReply.indexOf(NEW_MSG_LABEL);
+    const beforeReply = labelIdx !== -1
+      ? withoutReply.slice(labelIdx + NEW_MSG_LABEL.length)
+      : withoutReply.split('\n[Your last message:', 1)[0];
 
-    const replyToContext = this.extractReplyToContext(beforeReply);
+    const replyToContext = this.extractReplyToContext(withoutReply);
     const replyDirective = chatId
       ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;

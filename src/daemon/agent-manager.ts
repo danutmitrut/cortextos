@@ -873,7 +873,15 @@ export class AgentManager {
         const text = stripControlChars(msg.text || '');
         const lastSent = FastChecker.readLastSent(stateDir, effectiveChatId);
 
-        const recentHistory = buildRecentHistory(this.ctxRoot, name, effectiveChatId, 6) ?? undefined;
+        // 4 entries, not 6: history is the largest single contributor to block
+        // size, and oversized blocks are what the 2026-08-31 Windows truncation
+        // reacts to. Four exchanges still carry the thread.
+        //
+        // The message id is excluded because recordInboundTelegram() above has
+        // already written THIS message to the inbound log, so without it the
+        // arriving text would appear twice in one block: once as history, once
+        // as the new message.
+        const recentHistory = buildRecentHistory(this.ctxRoot, name, effectiveChatId, 4, msg.message_id) ?? undefined;
         const formatted = FastChecker.formatTelegramTextMessage(
           from,
           effectiveChatId,
