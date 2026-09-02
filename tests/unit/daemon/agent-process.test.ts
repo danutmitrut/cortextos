@@ -7,6 +7,7 @@ const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
+  injectMessageAndConfirm: vi.fn(),
   getPid: vi.fn().mockReturnValue(12345),
   isAlive: vi.fn().mockReturnValue(true),
   isAwaitingInteractiveConfirmation: vi.fn().mockReturnValue(false),
@@ -99,6 +100,7 @@ beforeEach(() => {
   mockPty.spawn.mockClear();
   mockPty.kill.mockClear();
   mockPty.write.mockClear();
+  mockPty.injectMessageAndConfirm.mockReset().mockResolvedValue(undefined);
   mockPty.isAlive.mockClear();
   mockPty.isAlive.mockReturnValue(true);
   mockPty.isAwaitingInteractiveConfirmation.mockClear();
@@ -111,6 +113,33 @@ beforeEach(() => {
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
   fsMocks.unlinkSync.mockReset();
+});
+
+describe('AgentProcess - serialized confirmed PTY injection', () => {
+  it('does not begin a second paste until the first paste-to-Enter cycle finishes', async () => {
+    let finishFirst!: () => void;
+    const firstFinished = new Promise<void>((resolve) => { finishFirst = resolve; });
+    mockPty.injectMessageAndConfirm
+      .mockImplementationOnce(() => firstFinished)
+      .mockResolvedValueOnce(undefined);
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    expect(ap.injectMessage('FIRST')).toBe(true);
+    expect(ap.injectMessage('SECOND')).toBe(true);
+    await Promise.resolve();
+
+    expect(mockPty.injectMessageAndConfirm).toHaveBeenCalledTimes(1);
+    expect(mockPty.injectMessageAndConfirm).toHaveBeenNthCalledWith(1, 'FIRST');
+
+    finishFirst();
+    await vi.waitFor(() => {
+      expect(mockPty.injectMessageAndConfirm).toHaveBeenCalledTimes(2);
+    });
+
+    expect(mockPty.injectMessageAndConfirm).toHaveBeenNthCalledWith(2, 'SECOND');
+  });
 });
 
 describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {

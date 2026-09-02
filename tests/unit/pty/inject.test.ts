@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MessageDedup, KEYS, injectMessage } from '../../../src/pty/inject';
+import {
+  MessageDedup,
+  KEYS,
+  injectMessage,
+  injectMessageAndConfirm,
+} from '../../../src/pty/inject';
 
 describe('MessageDedup', () => {
   it('detects duplicate content', () => {
@@ -176,5 +181,41 @@ describe('injectMessage — crash safety', () => {
 
     expect(writes[writes.length - 1]).toBe(KEYS.ENTER);
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('injectMessageAndConfirm — Windows submit regression', () => {
+  const content = [
+    '=== TELEGRAM from [USER: Dorina] (chat_id:5510317765) ===',
+    '[NEW MESSAGE from the user, answer this:]',
+    'Da, confirm responsabilitatile. Continua onboarding-ul. TEST-NOU-01',
+    "Reply using: cortextos bus send-telegram 5510317765 '<your reply>'",
+    '',
+  ].join('\n');
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('holds Enter until the Claude composer reflects the complete paste', async () => {
+    const writes: string[] = [];
+    const rendered = { value: '' };
+    const done = injectMessageAndConfirm(
+      (data) => { writes.push(data); },
+      content,
+      {
+        readRecent: () => rendered.value,
+        confirmTimeoutMs: 1000,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(writes).not.toContain(KEYS.ENTER);
+
+    rendered.value = `Claude composer redraw\n${content}`;
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(writes.filter((write) => write === KEYS.ENTER)).toHaveLength(1);
+    expect(writes[writes.length - 1]).toBe(KEYS.ENTER);
+    await done;
   });
 });

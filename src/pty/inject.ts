@@ -3,6 +3,12 @@ import { createHash } from 'crypto';
 // Bracketed paste mode escape sequences
 const PASTE_START = '\x1b[200~';
 const PASTE_END = '\x1b[201~';
+const MAX_CHUNK = 384;
+const CHUNK_DELAY_MS = 15;
+const CONFIRM_POLL_MS = 50;
+const CONFIRM_TIMEOUT_MS = 2000;
+const CONFIRM_SETTLE_MS = 150;
+const TAIL_PROBE_LEN = 24;
 
 // Key escape sequences for TUI navigation
 export const KEYS = {
@@ -82,9 +88,6 @@ export function injectMessage(
   //
   // Kept small enough that even a ~1KB limit cannot bite, large enough that a
   // 2KB block is ~5 writes and ~75ms — well inside any bracketed-paste timeout.
-  const MAX_CHUNK = 384;
-  const CHUNK_DELAY_MS = 15;
-
   // Same reason as the deferred Enter below: the PTY can be torn down between
   // scheduled chunks, and a dropped chunk must not take the daemon with it.
   const safeWrite = (data: string): void => {
@@ -127,6 +130,92 @@ export function injectMessage(
       console.warn(`[inject] deferred Enter failed (pty likely torn down): ${msg}`);
     }
   }, writeWindow + enterDelay);
+}
+
+/** Strip terminal redraw control sequences and normalize wrapped whitespace. */
+export function normalizeForProbe(value: string): string {
+  return value
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[@-Z\\-_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  return haystack.split(needle).length - 1;
+}
+
+function countPastePlaceholders(value: string): number {
+  return value.match(/pasted text/gi)?.length ?? 0;
+}
+
+export interface ConfirmedInjectOptions {
+  readRecent?: () => string;
+  enterDelay?: number;
+  confirmTimeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+/**
+ * Deliver one complete bracketed paste, wait until the runtime has rendered
+ * evidence of it, then submit. Awaiting this function lets callers serialize
+ * paste-to-Enter cycles so a later message cannot submit an earlier composer.
+ */
+export async function injectMessageAndConfirm(
+  write: (data: string) => void,
+  content: string,
+  options: ConfirmedInjectOptions = {},
+): Promise<void> {
+  const {
+    readRecent,
+    enterDelay = 300,
+    confirmTimeoutMs = CONFIRM_TIMEOUT_MS,
+    log,
+  } = options;
+
+  const probe = normalizeForProbe(content).slice(-TAIL_PROBE_LEN);
+  const baseline = readRecent ? normalizeForProbe(readRecent()) : '';
+  const probeBefore = countOccurrences(baseline, probe);
+  const placeholdersBefore = countPastePlaceholders(baseline);
+
+  write(PASTE_START);
+  for (let offset = 0; offset < content.length; offset += MAX_CHUNK) {
+    await sleep(CHUNK_DELAY_MS);
+    write(content.slice(offset, offset + MAX_CHUNK));
+  }
+  await sleep(CHUNK_DELAY_MS);
+  write(PASTE_END);
+
+  if (!readRecent || !probe) {
+    await sleep(enterDelay);
+  } else {
+    const deadline = Date.now() + confirmTimeoutMs;
+    let confirmed = false;
+    while (Date.now() < deadline) {
+      const current = normalizeForProbe(readRecent());
+      if (
+        countOccurrences(current, probe) > probeBefore
+        || countPastePlaceholders(current) > placeholdersBefore
+      ) {
+        confirmed = true;
+        break;
+      }
+      await sleep(CONFIRM_POLL_MS);
+    }
+    if (!confirmed) {
+      log?.(`inject: paste not confirmed in output within ${confirmTimeoutMs}ms — sending Enter anyway`);
+    }
+    await sleep(CONFIRM_SETTLE_MS);
+  }
+
+  try {
+    write(KEYS.ENTER);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[inject] deferred Enter failed (pty likely torn down): ${message}`);
+  }
 }
 
 /**

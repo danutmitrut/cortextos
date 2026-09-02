@@ -34,6 +34,7 @@ export class AgentProcess {
   private env: CtxEnv;
   private config: AgentConfig;
   private pty: AgentPTY | CodexAppServerPTY | null = null;
+  private injectChain: Promise<void> = Promise.resolve();
   private sessionTimer: ReturnType<typeof setTimeout> | null = null;
   private crashCount: number = 0;
   private maxCrashesPerDay: number = 10;
@@ -428,14 +429,28 @@ export class AgentProcess {
       return { ok: false, code: 'DEDUPED', message: `inject for "${this.name}" deduped — content matches MessageDedup hash window` };
     }
 
-    if ('injectMessage' in this.pty && typeof this.pty.injectMessage === 'function') {
-      this.pty.injectMessage(content);
-    } else {
-      // CodexAppServerPTY intentionally models stdin writes itself and does not
-      // inherit AgentPTY. Feed it through the same write path used historically.
-      injectMessageIntoPty((data) => this.pty?.write(data), content);
-    }
+    this.injectChain = this.injectChain
+      .then(() => this.performInject(content))
+      .catch((error) => {
+        this.log(`Inject failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     return { ok: true };
+  }
+
+  private async performInject(content: string): Promise<void> {
+    if (!this.pty || this.status !== 'running') {
+      this.log('Inject skipped: agent stopped while message was queued');
+      return;
+    }
+    if (
+      'injectMessageAndConfirm' in this.pty
+      && typeof this.pty.injectMessageAndConfirm === 'function'
+    ) {
+      await this.pty.injectMessageAndConfirm(content);
+      return;
+    }
+    injectMessageIntoPty((data) => this.pty?.write(data), content);
+    await sleep(450);
   }
 
   /**

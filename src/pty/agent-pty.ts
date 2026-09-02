@@ -3,7 +3,10 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { platform } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
-import { injectMessage as injectMessageIntoPty } from './inject.js';
+import {
+  injectMessage as injectMessageIntoPty,
+  injectMessageAndConfirm as injectMessageAndConfirmIntoPty,
+} from './inject.js';
 
 // node-pty types
 interface IPty {
@@ -376,6 +379,14 @@ export class AgentPTY {
    */
   injectMessage(content: string): void {
     injectMessageIntoPty((data) => this.write(data), content);
+  }
+
+  /** Wait for composer evidence before sending Enter. */
+  async injectMessageAndConfirm(content: string): Promise<void> {
+    await injectMessageAndConfirmIntoPty((data) => this.write(data), content, {
+      readRecent: () => this.outputBuffer.getRecent(),
+      log: (message) => console.log(`[agent-pty] ${message}`),
+    });
   }
 
   /**
