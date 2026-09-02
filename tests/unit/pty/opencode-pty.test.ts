@@ -76,6 +76,30 @@ describe('OpencodePTY', () => {
     return mockPty;
   };
 
+  it('keeps raw OpenCode typing semantics on the confirmed async path', async () => {
+    vi.useFakeTimers();
+    try {
+      const pty = new OpencodePTY(mockEnv, {});
+      installSpawnMock(pty);
+      await pty.spawn('fresh', '');
+      mockPty.write.mockClear();
+
+      const done = pty.injectMessageAndConfirm('hello from Telegram');
+
+      expect(mockPty.write.mock.calls[0][0]).toBe('\x1b');
+      expect(mockPty.write.mock.calls.map((call) => call[0])).not.toContain('\x1b[200~');
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(mockPty.write.mock.calls[1][0]).toBe('hello from Telegram');
+
+      await vi.advanceTimersByTimeAsync(300);
+      await done;
+      expect(mockPty.write.mock.calls.at(-1)?.[0]).toBe('\r');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns opencode as the binary name', () => {
     const pty = new OpencodePTY(mockEnv, {});
     expect((pty as unknown as { getBinaryName(): string }).getBinaryName()).toBe('opencode');

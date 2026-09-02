@@ -41,6 +41,12 @@ const REAP_SIGKILL_GRACE_MS = 2000;
 const reapSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+const injectionSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+
 // OS-level pid liveness probe using the signal-0 idiom (mirrors the isPidAlive
 // helper in src/daemon/agent-manager.ts): signal 0 sends nothing, it only tests
 // existence + our permission to signal. ESRCH => the process is gone (dead);
@@ -174,6 +180,10 @@ export class OpencodePTY extends AgentPTY {
   }
 
   override injectMessage(content: string): void {
+    void this.injectMessageAndConfirm(content);
+  }
+
+  override async injectMessageAndConfirm(content: string): Promise<void> {
     // OpenCode v1.17.9's TUI does not reliably surface content delivered with
     // bracketed paste (`ESC[200~ ... ESC[201~`): sandbox validation showed the
     // shared injector could repaint the screen without the inbound message
@@ -207,36 +217,34 @@ export class OpencodePTY extends AgentPTY {
       return;
     }
 
-    if (mode === 'shell') {
-      setTimeout(() => {
-        try {
-          this.write('exit');
-          this.write(KEYS.ENTER);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[opencode-pty] shell exit-recovery failed before injection (pty likely torn down): ${msg}`);
-          return;
-        }
-        setTimeout(() => {
-          try {
-            this.typeAndSubmit(safeContent);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn(`[opencode-pty] deferred injection failed after shell exit (pty likely torn down): ${msg}`);
-          }
-        }, INJECTION_SHELL_EXIT_SETTLE_MS).unref?.();
-      }, INJECTION_SHELL_RESET_DELAY_MS).unref?.();
-      return;
-    }
+    await injectionSleep(INJECTION_SHELL_RESET_DELAY_MS);
 
-    setTimeout(() => {
+    if (mode === 'shell') {
       try {
-        this.typeAndSubmit(safeContent);
+        this.write('exit');
+        this.write(KEYS.ENTER);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[opencode-pty] deferred injection failed (pty likely torn down): ${msg}`);
+        console.warn(`[opencode-pty] shell exit-recovery failed before injection (pty likely torn down): ${msg}`);
+        return;
       }
-    }, INJECTION_SHELL_RESET_DELAY_MS).unref?.();
+      await injectionSleep(INJECTION_SHELL_EXIT_SETTLE_MS);
+    }
+
+    try {
+      this.typeContent(safeContent);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[opencode-pty] deferred injection failed (pty likely torn down): ${msg}`);
+      return;
+    }
+    await injectionSleep(300);
+    try {
+      this.write(KEYS.ENTER);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[opencode-pty] deferred Enter failed (pty likely torn down): ${msg}`);
+    }
   }
 
   /**
@@ -274,19 +282,11 @@ export class OpencodePTY extends AgentPTY {
     return SHELL_PROMPT_TAIL_PATTERN.test(lastNonEmpty) ? 'shell' : 'chat';
   }
 
-  private typeAndSubmit(safeContent: string): void {
+  private typeContent(safeContent: string): void {
     const maxChunk = 4096;
     for (let i = 0; i < safeContent.length; i += maxChunk) {
       this.write(safeContent.slice(i, i + maxChunk));
     }
-    setTimeout(() => {
-      try {
-        this.write(KEYS.ENTER);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[opencode-pty] deferred Enter failed (pty likely torn down): ${msg}`);
-      }
-    }, 300).unref?.();
   }
 
   private prepareInjectedContent(content: string): string {

@@ -219,3 +219,28 @@ describe('injectMessageAndConfirm — Windows submit regression', () => {
     await done;
   });
 });
+
+describe('injectMessage — completion contract', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('resolves only after Enter for a long chunked fallback message', async () => {
+    const writes: string[] = [];
+    let completed = false;
+    const done = injectMessage(
+      (data) => { writes.push(data); },
+      'x'.repeat(4000),
+      300,
+    );
+    done.then(() => { completed = true; });
+
+    await vi.advanceTimersByTimeAsync(450);
+    expect(completed).toBe(false);
+    expect(writes).not.toContain(KEYS.ENTER);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await done;
+    expect(completed).toBe(true);
+    expect(writes[writes.length - 1]).toBe(KEYS.ENTER);
+  });
+});

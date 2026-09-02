@@ -70,7 +70,7 @@ export function injectMessage(
   write: (data: string) => void,
   content: string,
   enterDelay: number = 300,
-): void {
+): Promise<void> {
   // Chunk EVERY write, not just oversized ones.
   //
   // Why (2026-08-31, Windows field report): a single 1316-char write reached
@@ -122,14 +122,18 @@ export function injectMessage(
   // Root cause: PR #196 fixed three this.pty! callers in agent-process.ts
   // but missed worker-process.ts:93. This try/catch is the structural fix
   // that covers every present and future caller.
-  setTimeout(() => {
-    try {
-      write(KEYS.ENTER);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[inject] deferred Enter failed (pty likely torn down): ${msg}`);
-    }
-  }, writeWindow + enterDelay);
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      try {
+        write(KEYS.ENTER);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[inject] deferred Enter failed (pty likely torn down): ${msg}`);
+      } finally {
+        resolve();
+      }
+    }, writeWindow + enterDelay);
+  });
 }
 
 /** Strip terminal redraw control sequences and normalize wrapped whitespace. */

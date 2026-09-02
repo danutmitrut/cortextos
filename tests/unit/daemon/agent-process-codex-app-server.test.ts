@@ -103,7 +103,7 @@ beforeEach(() => {
     pty.getOutputBuffer.mockClear();
   }
   mockCodexAppServerPty.setTelegramHandle.mockClear();
-  mockInjectMessage.mockClear();
+  mockInjectMessage.mockReset().mockResolvedValue(undefined);
   fsMocks.existsSync.mockReset().mockReturnValue(false);
   fsMocks.readFileSync.mockReset();
   fsMocks.writeFileSync.mockReset();
@@ -112,6 +112,36 @@ beforeEach(() => {
 });
 
 describe('AgentProcess codex-app-server runtime', () => {
+  it('serializes fallback injections until the prior deferred Enter completes', async () => {
+    vi.useFakeTimers();
+    let finishFirst!: () => void;
+    const firstFinished = new Promise<void>((resolve) => { finishFirst = resolve; });
+    mockInjectMessage
+      .mockImplementationOnce(() => firstFinished)
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+      await ap.start();
+
+      expect(ap.injectMessage('FIRST')).toBe(true);
+      expect(ap.injectMessage('SECOND')).toBe(true);
+      await Promise.resolve();
+      expect(mockInjectMessage).toHaveBeenCalledTimes(1);
+
+      // A fixed wait would release SECOND even though FIRST has not completed.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockInjectMessage).toHaveBeenCalledTimes(1);
+
+      finishFirst();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockInjectMessage).toHaveBeenCalledTimes(2);
+      expect(mockInjectMessage).toHaveBeenNthCalledWith(2, expect.any(Function), 'SECOND');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('selects CodexAppServerPTY for runtime codex-app-server', async () => {
     const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
     await ap.start();

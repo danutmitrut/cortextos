@@ -449,8 +449,7 @@ export class AgentProcess {
       await this.pty.injectMessageAndConfirm(content);
       return;
     }
-    injectMessageIntoPty((data) => this.pty?.write(data), content);
-    await sleep(450);
+    await injectMessageIntoPty((data) => this.pty?.write(data), content);
   }
 
   /**
