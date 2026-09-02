@@ -243,4 +243,21 @@ describe('injectMessage — completion contract', () => {
     expect(completed).toBe(true);
     expect(writes[writes.length - 1]).toBe(KEYS.ENTER);
   });
+
+  it('never splits an emoji surrogate pair across Windows PTY writes', async () => {
+    const writes: string[] = [];
+    const content = `${'a'.repeat(383)}😀tail`;
+    const done = injectMessage((data) => { writes.push(data); }, content, 0);
+
+    await vi.runAllTimersAsync();
+    await done;
+
+    const contentWrites = writes.filter(
+      (write) => write !== PASTE_START && write !== PASTE_END && write !== KEYS.ENTER,
+    );
+    expect(contentWrites.join('')).toBe(content);
+    for (const write of contentWrites) {
+      expect(Buffer.from(write, 'utf8').toString('utf8')).toBe(write);
+    }
+  });
 });

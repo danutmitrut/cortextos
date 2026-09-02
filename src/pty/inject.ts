@@ -10,6 +10,25 @@ const CONFIRM_TIMEOUT_MS = 2000;
 const CONFIRM_SETTLE_MS = 150;
 const TAIL_PROBE_LEN = 24;
 
+function splitPtyChunks(content: string): string[] {
+  const chunks: string[] = [];
+  let offset = 0;
+  while (offset < content.length) {
+    let end = Math.min(offset + MAX_CHUNK, content.length);
+    if (
+      end < content.length
+      && end > offset
+      && /[\uD800-\uDBFF]/.test(content[end - 1])
+      && /[\uDC00-\uDFFF]/.test(content[end])
+    ) {
+      end -= 1;
+    }
+    chunks.push(content.slice(offset, end));
+    offset = end;
+  }
+  return chunks;
+}
+
 // Key escape sequences for TUI navigation
 export const KEYS = {
   ENTER: '\r',
@@ -99,10 +118,7 @@ export function injectMessage(
     }
   };
 
-  const chunks: string[] = [PASTE_START];
-  for (let i = 0; i < content.length; i += MAX_CHUNK) {
-    chunks.push(content.slice(i, i + MAX_CHUNK));
-  }
+  const chunks: string[] = [PASTE_START, ...splitPtyChunks(content)];
   chunks.push(PASTE_END);
 
   chunks.forEach((chunk, idx) => {
@@ -185,9 +201,9 @@ export async function injectMessageAndConfirm(
   const placeholdersBefore = countPastePlaceholders(baseline);
 
   write(PASTE_START);
-  for (let offset = 0; offset < content.length; offset += MAX_CHUNK) {
+  for (const chunk of splitPtyChunks(content)) {
     await sleep(CHUNK_DELAY_MS);
-    write(content.slice(offset, offset + MAX_CHUNK));
+    write(chunk);
   }
   await sleep(CHUNK_DELAY_MS);
   write(PASTE_END);
